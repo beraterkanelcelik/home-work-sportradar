@@ -42,8 +42,11 @@ migrate: ## Run database migrations
 makemigrations: ## Create new migrations
 	docker-compose exec backend python manage.py makemigrations
 
-superuser: ## Create Django superuser
+superuser: ## Create Django superuser (interactive - may not work on Windows)
 	docker-compose exec backend python manage.py createsuperuser
+
+superuser-create: ## Create Django superuser non-interactively (usage: make superuser-create EMAIL=admin@example.com PASSWORD=password)
+	docker-compose exec backend python create_superuser.py $(EMAIL) $(PASSWORD)
 
 test: ## Run tests
 	docker-compose exec backend python manage.py test
