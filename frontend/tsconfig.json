@@ -24,7 +24,6 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": false,
     "noImplicitAny": false,
-    "suppressImplicitAnyIndexErrors": true,
     "noImplicitThis": false,
     "alwaysStrict": false,
     "noResolve": false,
