@@ -1,116 +1,205 @@
-# AI Agents Project with LangChain and LangGraph
+# AI Agent Test Website
 
-A clean, modular project structure for building and testing AI agents using LangChain, LangGraph, Streamlit, and LangSmith for tracing and observability.
+A monorepo project for building and testing AI agents using Django, LangChain, LangGraph, PostgreSQL with pgvector, and React + Vite frontend.
 
 ## Project Structure
 
 ```
 TestAgentProject/
-├── .env.example              # Environment variables template
-├── .gitignore               # Git ignore rules
-├── .dockerignore            # Docker ignore rules
-├── Dockerfile               # Docker image configuration
-├── docker-compose.yml       # Docker Compose configuration
-├── README.md                # Project documentation
-├── requirements.txt         # Python dependencies
-├── app.py                   # Main Streamlit chat interface
-├── agents/                  # Agent implementations
-│   ├── __init__.py
-│   └── base_agent.py       # Base agent class skeleton
-├── utils/                   # Utility modules
-│   ├── __init__.py
-│   ├── logger.py           # Generic logger (LangSmith integration ready)
-│   └── config.py           # Configuration loader
-└── config/                  # Configuration files
-    ├── __init__.py
-    └── settings.py         # Settings management
+├─ README.md
+├─ .gitignore
+├─ .env.example
+├─ docker-compose.yml          # Root level orchestration
+├─ Makefile                    # Convenience commands
+├─ scripts/                    # Utility scripts
+│  ├─ dev.sh
+│  └─ seed_demo_data.py
+│
+├─ infra/                      # Infrastructure configs
+│  ├─ postgres/
+│  │  ├─ init.sql
+│  │  └─ extensions.sql       # pgvector extension
+│  └─ nginx/
+│     └─ nginx.conf
+│
+├─ backend/                    # Django backend
+│  ├─ Dockerfile
+│  ├─ requirements.txt
+│  ├─ manage.py
+│  ├─ .env.example
+│  ├─ tests/
+│  └─ app/                     # Main Django app
+│     ├─ settings.py
+│     ├─ urls.py
+│     ├─ api/                   # API endpoints
+│     ├─ core/                  # Core utilities
+│     ├─ db/                    # Database models
+│     ├─ services/              # Business logic
+│     ├─ rag/                   # RAG components
+│     ├─ agents/                # LangGraph agents
+│     └─ observability/         # Tracing
+│
+└─ frontend/                   # React + Vite frontend
+   ├─ Dockerfile
+   ├─ package.json
+   ├─ vite.config.ts
+   ├─ tailwind.config.js
+   ├─ .env.example
+   └─ src/
+      ├─ app/
+      ├─ components/
+      ├─ lib/
+      └─ state/
 ```
 
 ## Prerequisites
 
-- Docker and Docker Compose installed on your system
-- Git (optional, for version control)
+- Docker and Docker Compose
+- Git (optional)
 
-## Setup Instructions
+## Quick Start
 
-### 1. Initialize Git Repository (Optional)
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: AI Agents project structure"
-```
-
-### 2. Environment Configuration
-
-1. Create `.env` file from the example:
+1. **Create environment file:**
    ```bash
-   # On Windows:
    copy .env.example .env
-   # On macOS/Linux:
-   cp .env.example .env
+   # On macOS/Linux: cp .env.example .env
    ```
 
-2. Edit `.env` file and add your LangSmith API key:
-   - Get your API key from [https://smith.langchain.com/](https://smith.langchain.com/)
-   - Replace `your_langsmith_api_key_here` with your actual API key
-   - Ensure `LANGCHAIN_TRACING_V2=true` is set
+2. **Edit `.env` file** with your API keys and configuration
 
-### 3. Build and Run with Docker
+3. **Start all services:**
+   ```bash
+   make up
+   # Or: docker-compose up -d
+   ```
+
+4. **Run migrations:**
+   ```bash
+   make migrate
+   ```
+
+5. **Access the application:**
+   - Frontend: http://localhost:3000
+   - Backend API: http://localhost:8000
+   - Nginx Proxy: http://localhost
+   - Admin: http://localhost/admin/
+
+## Makefile Commands
 
 ```bash
-# Build the Docker image
-docker-compose build
-
-# Start the application
-docker-compose up
-
-# Or run in detached mode (background)
-docker-compose up -d
+make help          # Show all available commands
+make build         # Build all Docker images
+make up            # Start all services
+make down          # Stop all services
+make restart       # Restart all services
+make logs          # Show logs from all services
+make migrate       # Run database migrations
+make superuser     # Create Django superuser
+make test          # Run tests
+make clean         # Remove all containers and volumes
 ```
 
-The application will be available at: **http://localhost:8501**
+## Development
 
-### 4. Docker Commands
+### Backend Development
 
 ```bash
-# Stop the application
-docker-compose down
+# Open backend shell
+make shell-backend
 
-# View logs
-docker-compose logs -f
+# Create migrations
+make makemigrations
 
-# Rebuild after code changes
-docker-compose build --no-cache
+# Run migrations
+make migrate
 
-# Execute commands in the container
-docker-compose exec ai-agents-app bash
-
-# Restart the container
-docker-compose restart
+# Run tests
+make test
 ```
+
+### Frontend Development
+
+The frontend runs in development mode with hot-reload enabled. Changes are automatically reflected.
+
+### Database Access
+
+```bash
+# Open psql shell
+make shell-db
+
+# Or directly
+docker-compose exec db psql -U postgres -d ai_agents_db
+```
+
+## Architecture
+
+### Backend (Django)
+
+- **API Layer** (`app/api/`): REST API endpoints
+- **Core** (`app/core/`): Configuration, security, logging
+- **Database** (`app/db/`): Models and database operations
+- **Services** (`app/services/`): Business logic
+- **RAG** (`app/rag/`): Document processing and vector search
+- **Agents** (`app/agents/`): LangGraph agent definitions
+- **Observability** (`app/observability/`): LangSmith tracing
+
+### Frontend (React + Vite)
+
+- **Framework**: React 18 with Vite
+- **UI**: Tailwind CSS + shadcn/ui components
+- **State Management**: Zustand
+- **Routing**: React Router
+- **API Client**: Axios with interceptors
+- **Streaming**: SSE (Server-Sent Events) for agent responses
+
+### Database (PostgreSQL + pgvector)
+
+- Multi-tenant architecture with user isolation
+- Vector embeddings for RAG
+- All queries filtered by `user_id`
 
 ## Features
 
-- **Dockerized Environment**: Containerized setup for consistent development and deployment
-- **Modular Architecture**: Clean separation of concerns with dedicated folders for agents, utilities, and configuration
-- **LangSmith Integration**: Built-in support for tracing and observability
-- **Streamlit Interface**: Ready-to-use chat interface for interacting with agents
-- **Type Hints**: All skeleton code includes type hints for better code clarity
-- **Well Documented**: Comprehensive docstrings and comments for study purposes
-- **Hot Reload**: Code changes are automatically reflected in the running container
+- ✅ Multi-user authentication (JWT)
+- ✅ Chat sessions and messages
+- ✅ Document upload and ingestion
+- ✅ RAG with pgvector
+- ✅ LangGraph agents
+- ✅ LangSmith tracing
+- ✅ Hot-reload for development
 
-## Next Steps
+## API Endpoints
 
-This is a skeleton structure. You can now:
-- Implement your agent logic in `agents/base_agent.py`
-- Add new agents by extending the base agent class
-- Configure logging and tracing in `utils/logger.py`
-- Customize settings in `config/settings.py`
+- `GET /api/health/` - Health check
+- `POST /api/auth/signup/` - User registration
+- `POST /api/auth/login/` - User login
+- `GET /api/users/me/` - Get current user
+- `GET /api/chats/` - List chat sessions
+- `POST /api/chats/` - Create chat session
+- `GET /api/documents/` - List documents
+- `POST /api/documents/` - Upload document
+- `POST /api/agent/run/` - Run agent
 
-## Dependencies
+## Environment Variables
 
-- **LangChain**: Framework for building LLM applications
-- **LangGraph**: For creating stateful, multi-actor applications
-- **Streamlit**: For building the chat interface
-- **LangSmith**: For tracing, debugging, and monitoring LLM applications
+See `.env.example` for all required environment variables:
+
+- Django configuration
+- PostgreSQL connection
+- LangSmith API keys
+- OpenAI API keys
+
+## Documentation
+
+- [Django Documentation](https://docs.djangoproject.com/)
+- [LangChain Documentation](https://python.langchain.com/)
+- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
+- [pgvector Documentation](https://github.com/pgvector/pgvector)
+- [React Documentation](https://react.dev/)
+- [Vite Documentation](https://vitejs.dev/)
+- [Tailwind CSS Documentation](https://tailwindcss.com/)
+- [shadcn/ui Documentation](https://ui.shadcn.com/)
+
+## License
+
+MIT

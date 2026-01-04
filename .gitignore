@@ -38,9 +38,6 @@ venv.bak/
 *.swo
 *~
 
-# Streamlit
-.streamlit/
-
 # OS
 .DS_Store
 Thumbs.db
@@ -49,9 +46,28 @@ Thumbs.db
 *.log
 logs/
 
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/media/
+/static/
+
 # LangSmith cache
 .langsmith/
 
-# Docker
-.docker/
-docker-compose.override.yml
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env*.local
+
+# Backend
+backend/__pycache__/
+backend/*.pyc
+backend/staticfiles/
+backend/media/
+backend/db.sqlite3

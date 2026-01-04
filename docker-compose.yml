@@ -1,23 +1,101 @@
-version: '3.8'
-
 services:
-  ai-agents-app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ai-agents-chat
+  # PostgreSQL Database with pgvector extension
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: postgres-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ai_agents_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "-E UTF8"
     ports:
-      - "8501:8501"
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/extensions.sql:/docker-entrypoint-initdb.d/extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Django Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: django-backend
+    ports:
+      - "8000:8000"
     env_file:
       - .env
-    volumes:
-      # Mount code for development (hot reload)
-      - .:/app
-      # Exclude node_modules and other unnecessary files
-      - /app/__pycache__
-      - /app/.streamlit
     environment:
       - PYTHONUNBUFFERED=1
+      - DEBUG=True
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME:-ai_agents_db}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_PORT=5432
+    volumes:
+      # Mount code for development (hot reload)
+      - ./backend:/app
+      # Exclude cache files for better performance
+      - /app/__pycache__
+      - /app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     stdin_open: true
     tty: true
+    networks:
+      - app-network
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+
+  # Frontend (React + Vite)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: react-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    volumes:
+      # Mount code for development (hot reload)
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/dist
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Nginx (Reverse Proxy - Optional for production)
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./backend/staticfiles:/usr/share/nginx/html/static:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
