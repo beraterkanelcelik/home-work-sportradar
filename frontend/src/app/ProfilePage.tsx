@@ -108,11 +108,25 @@ export default function ProfilePage() {
   }
 
   if (loading) {
-    return <div className="text-center py-8">Loading...</div>
+    return (
+      <div className="text-center py-12">
+        <div className="inline-flex items-center gap-2 text-muted-foreground">
+          <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span>Loading...</span>
+        </div>
+      </div>
+    )
   }
 
   if (!profile) {
-    return <div className="text-center py-8">Failed to load profile</div>
+    return (
+      <div className="text-center py-12">
+        <p className="text-muted-foreground">Failed to load profile</p>
+      </div>
+    )
   }
 
   return (
@@ -121,19 +135,19 @@ export default function ProfilePage() {
 
       {/* Token Usage Section */}
       {stats && (
-        <div className="border rounded-lg p-6">
+        <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
           <h2 className="text-xl font-semibold mb-4">Token Usage</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Total Tokens</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Total Tokens</label>
               <p className="text-2xl font-bold">{stats.total_tokens.toLocaleString()}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">This Month</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">This Month</label>
               <p className="text-2xl font-bold">{stats.tokens_this_month.toLocaleString()}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Last 30 Days</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Last 30 Days</label>
               <p className="text-2xl font-bold">{stats.tokens_last_30_days.toLocaleString()}</p>
             </div>
           </div>
@@ -141,27 +155,27 @@ export default function ProfilePage() {
       )}
 
       {/* Basic Information Section */}
-      <div className="border rounded-lg p-6">
+      <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
         <h2 className="text-xl font-semibold mb-4">Basic Information</h2>
         {!editing ? (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Email</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Email</label>
               <p className="text-base">{profile.email}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">First Name</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">First Name</label>
               <p className="text-base">{profile.first_name || 'Not set'}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Last Name</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Last Name</label>
               <p className="text-base">{profile.last_name || 'Not set'}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground">Account Created</label>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Account Created</label>
               <p className="text-base">{new Date(profile.created_at).toLocaleDateString()}</p>
             </div>
-            <Button onClick={() => setEditing(true)} className="mt-4">
+            <Button onClick={() => setEditing(true)} className="mt-4 rounded-lg">
               Edit Profile
             </Button>
           </div>
@@ -173,7 +187,7 @@ export default function ProfilePage() {
                 type="email"
                 value={profile.email}
                 disabled
-                className="w-full px-3 py-2 border rounded-md bg-muted"
+                className="w-full px-4 py-3 border rounded-2xl bg-muted focus:outline-none"
               />
               <p className="text-xs text-muted-foreground mt-1">Email cannot be changed</p>
             </div>
@@ -183,7 +197,7 @@ export default function ProfilePage() {
                 type="text"
                 value={firstName}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFirstName(e.target.value)}
-                className="w-full px-3 py-2 border rounded-md"
+                className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               />
             </div>
             <div>
@@ -192,18 +206,18 @@ export default function ProfilePage() {
                 type="text"
                 value={lastName}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLastName(e.target.value)}
-                className="w-full px-3 py-2 border rounded-md"
+                className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               />
             </div>
-            <div className="flex gap-2">
-              <Button onClick={handleSaveProfile} disabled={saving}>
+            <div className="flex gap-3">
+              <Button onClick={handleSaveProfile} disabled={saving} className="rounded-lg">
                 {saving ? 'Saving...' : 'Save Changes'}
               </Button>
               <Button variant="outline" onClick={() => {
                 setEditing(false)
                 setFirstName(profile.first_name || '')
                 setLastName(profile.last_name || '')
-              }}>
+              }} className="rounded-lg">
                 Cancel
               </Button>
             </div>
@@ -212,7 +226,7 @@ export default function ProfilePage() {
       </div>
 
       {/* Change Password Section */}
-      <div className="border rounded-lg p-6">
+      <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
         <h2 className="text-xl font-semibold mb-4">Change Password</h2>
         <div className="space-y-4">
           <div>
@@ -221,7 +235,7 @@ export default function ProfilePage() {
               type="password"
               value={oldPassword}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setOldPassword(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md"
+              className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             />
           </div>
           <div>
@@ -230,7 +244,7 @@ export default function ProfilePage() {
               type="password"
               value={newPassword}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewPassword(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md"
+              className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               minLength={8}
             />
             <p className="text-xs text-muted-foreground mt-1">Must be at least 8 characters</p>
@@ -241,11 +255,11 @@ export default function ProfilePage() {
               type="password"
               value={confirmPassword}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md"
+              className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               minLength={8}
             />
           </div>
-          <Button onClick={handleChangePassword} disabled={changingPassword}>
+          <Button onClick={handleChangePassword} disabled={changingPassword} className="rounded-lg">
             {changingPassword ? 'Changing...' : 'Change Password'}
           </Button>
         </div>

@@ -8,6 +8,7 @@ import SignupPage from '@/app/auth/SignupPage'
 import DashboardPage from '@/app/DashboardPage'
 import ProfilePage from '@/app/ProfilePage'
 import ChatPage from '@/app/chat/ChatPage'
+import DocumentsPage from '@/app/documents/DocumentsPage'
 
 function App() {
   return (
@@ -20,6 +21,7 @@ function App() {
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="chat/:sessionId?" element={<ChatPage />} />
+          <Route path="documents" element={<DocumentsPage />} />
         </Route>
       </Routes>
       <Toaster position="top-right" />

@@ -53,9 +53,9 @@ export default function SignupPage() {
         />
         <h1 className="text-2xl font-bold">Sign Up</h1>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-5">
         {error && (
-          <div className="p-3 bg-destructive/10 text-destructive rounded-md">
+          <div className="p-4 bg-destructive/10 text-destructive rounded-lg border border-destructive/20">
             {error}
           </div>
         )}
@@ -65,7 +65,7 @@ export default function SignupPage() {
             type="email"
             value={email}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
-            className="w-full px-3 py-2 border rounded-md"
+            className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             required
           />
         </div>
@@ -76,7 +76,7 @@ export default function SignupPage() {
               type="text"
               value={firstName}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFirstName(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md"
+              className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             />
           </div>
           <div>
@@ -85,7 +85,7 @@ export default function SignupPage() {
               type="text"
               value={lastName}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLastName(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md"
+              className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             />
           </div>
         </div>
@@ -95,7 +95,7 @@ export default function SignupPage() {
             type="password"
             value={password}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
-            className="w-full px-3 py-2 border rounded-md"
+            className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             required
             minLength={8}
           />
@@ -109,11 +109,11 @@ export default function SignupPage() {
             type="password"
             value={confirmPassword}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value)}
-            className="w-full px-3 py-2 border rounded-md"
+            className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
             required
           />
         </div>
-        <Button type="submit" className="w-full" disabled={loading}>
+        <Button type="submit" className="w-full rounded-lg" disabled={loading}>
           {loading ? 'Signing up...' : 'Sign Up'}
         </Button>
       </form>

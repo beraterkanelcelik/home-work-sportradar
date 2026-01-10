@@ -34,6 +34,9 @@ export default function Layout() {
                 <Link to="/chat">
                   <Button variant="ghost">Chats</Button>
                 </Link>
+                <Link to="/documents">
+                  <Button variant="ghost">Documents</Button>
+                </Link>
                 <Link to="/profile">
                   <Button variant="ghost">Profile</Button>
                 </Link>
