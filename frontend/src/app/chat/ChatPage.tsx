@@ -549,8 +549,10 @@ export default function ChatPage() {
                   {sessions.map((session: { id: number; title: string; updated_at: string }) => (
                     <div
                       key={session.id}
-                      className={`group relative px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors ${
-                        currentSession?.id === session.id ? 'bg-muted/50' : ''
+                      className={`group relative px-3 py-2 mx-2 rounded-lg cursor-pointer transition-colors ${
+                        currentSession?.id === session.id 
+                          ? 'bg-primary/10 hover:bg-primary/15' 
+                          : 'hover:bg-muted/50'
                       }`}
                     >
                       {renameSessionId === session.id ? (
@@ -598,7 +600,11 @@ export default function ChatPage() {
                             className="flex items-center justify-between"
                           >
                             <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm truncate">
+                              <p className={`text-sm truncate ${
+                                currentSession?.id === session.id 
+                                  ? 'font-semibold text-foreground' 
+                                  : 'font-medium'
+                              }`}>
                                 {session.title || 'Untitled Chat'}
                               </p>
                             </div>
