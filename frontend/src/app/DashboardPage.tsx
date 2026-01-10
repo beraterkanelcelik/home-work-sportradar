@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
-import { useChatStore, type ChatSession } from '@/state/useChatStore'
+import { useChatStore } from '@/state/useChatStore'
 import { documentAPI } from '@/lib/api'
 import { toast } from 'sonner'
 import { getErrorMessage } from '@/lib/utils'
@@ -14,7 +14,7 @@ interface Document {
 }
 
 export default function DashboardPage() {
-  const { sessions, loadSessions, createSession } = useChatStore()
+  const { createSession } = useChatStore()
   const navigate = useNavigate()
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(true)
@@ -26,15 +26,10 @@ export default function DashboardPage() {
   const loadData = async () => {
     setLoading(true)
     try {
-      await loadSessions()
-      try {
-        const response = await documentAPI.getDocuments()
-        setDocuments(response.data.documents || [])
-      } catch (error: unknown) {
-        // Documents endpoint might not be implemented yet - silently fail
-      }
+      const response = await documentAPI.getDocuments()
+      setDocuments(response.data.documents || [])
     } catch (error: unknown) {
-      toast.error(getErrorMessage(error, 'Failed to load dashboard data'))
+      // Documents endpoint might not be implemented yet - silently fail
     } finally {
       setLoading(false)
     }
@@ -46,11 +41,6 @@ export default function DashboardPage() {
       navigate(`/chat/${session.id}`)
     }
   }
-
-  // Sort sessions by updated_at (most recent first)
-  const sortedSessions = [...sessions].sort((a, b) => {
-    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-  })
 
   // Sort documents by updated_at (most recent first)
   const sortedDocuments = [...documents].sort((a, b) => {
@@ -83,37 +73,7 @@ export default function DashboardPage() {
       {loading ? (
         <div className="text-center py-8">Loading...</div>
       ) : (
-        <div className="grid gap-6 md:grid-cols-2">
-          {/* Latest Chats */}
-          <div>
-            <h2 className="text-xl font-semibold mb-4">Latest Chats</h2>
-            {sortedSessions.length === 0 ? (
-              <p className="text-muted-foreground">No chats yet</p>
-            ) : (
-              <div className="space-y-2">
-                {sortedSessions.slice(0, 5).map((session: ChatSession) => (
-                  <Link
-                    key={session.id}
-                    to={`/chat/${session.id}`}
-                    className="block p-4 border rounded-lg hover:bg-muted transition-colors"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <h3 className="font-medium">{session.title || 'Untitled Chat'}</h3>
-                        <p className="text-sm text-muted-foreground">
-                          {new Date(session.updated_at).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        {session.tokens_used.toLocaleString()} tokens
-                      </span>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
-
+        <div>
           {/* Latest Documents */}
           <div>
             <h2 className="text-xl font-semibold mb-4">Latest Documents</h2>

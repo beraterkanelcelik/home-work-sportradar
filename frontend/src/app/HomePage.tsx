@@ -5,6 +5,7 @@ import { useChatStore } from '@/state/useChatStore'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { getErrorMessage } from '@/lib/utils'
+import logoWithText from '@/assets/logowithtextblacktransparent.png'
 
 export default function HomePage() {
   const { isAuthenticated } = useAuthStore()
@@ -38,8 +39,14 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh]">
-      <h1 className="text-4xl font-bold mb-4">Agent Playground</h1>
-      <p className="text-muted-foreground mb-8">
+      <div className="flex flex-col items-center -mb-32">
+        <img 
+          src={logoWithText} 
+          alt="Agent Playground" 
+          className="h-96 w-auto object-contain"
+        />
+      </div>
+      <p className="text-muted-foreground mb-1 text-center text-xs">
         Chat with AI agents powered by LangChain and LangGraph
       </p>
       

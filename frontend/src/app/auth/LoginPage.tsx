@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
 import { getErrorMessage } from '@/lib/utils'
+import logo from '@/assets/logoAPblacktransparent.png'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -29,7 +30,14 @@ export default function LoginPage() {
 
   return (
     <div className="max-w-md mx-auto">
-      <h1 className="text-2xl font-bold mb-6">Login</h1>
+      <div className="flex flex-col items-center mb-8">
+        <img 
+          src={logo} 
+          alt="Agent Playground" 
+          className="h-24 w-auto mb-5 object-contain"
+        />
+        <h1 className="text-2xl font-bold">Login</h1>
+      </div>
       <form onSubmit={handleSubmit} className="space-y-4">
         {error && (
           <div className="p-3 bg-destructive/10 text-destructive rounded-md">

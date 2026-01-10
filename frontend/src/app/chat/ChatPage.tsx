@@ -101,8 +101,11 @@ export default function ChatPage() {
   } = useChatStore()
 
   useEffect(() => {
-    loadSessions()
-  }, [loadSessions])
+    // Load sessions list on mount, but don't reload if already loaded
+    if (sessions.length === 0) {
+      loadSessions()
+    }
+  }, []) // Only run once on mount
 
   // Store initial message from location state when component mounts or sessionId changes
   useEffect(() => {
@@ -120,12 +123,19 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (sessionId) {
-      loadSession(Number(sessionId))
+      const sessionIdNum = Number(sessionId)
+      // Only load session if it's not already loaded or if it's a different session
+      if (!currentSession || currentSession.id !== sessionIdNum) {
+        loadSession(sessionIdNum)
+      } else {
+        // Session is already loaded, but ensure messages are loaded
+        loadMessages(sessionIdNum)
+      }
       initialMessageSentRef.current = false
     } else {
       clearCurrentSession()
     }
-  }, [sessionId, loadSession, clearCurrentSession])
+  }, [sessionId, loadSession, loadMessages, clearCurrentSession, currentSession])
 
   const loadChatStats = useCallback(async (sessionId: number) => {
     setLoadingStats(true)
@@ -517,21 +527,6 @@ export default function ChatPage() {
                       {error}
                     </div>
                   )}
-                  {/* Streaming Toggle */}
-                  <div className="mb-2 flex items-center gap-2">
-                    <label className="flex items-center gap-2 text-sm cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={useStreaming}
-                        onChange={(e) => setUseStreaming(e.target.checked)}
-                        className="w-4 h-4"
-                        disabled={sending}
-                      />
-                      <span className={useStreaming ? 'text-primary' : 'text-muted-foreground'}>
-                        Streaming {useStreaming ? '(ON)' : '(OFF)'}
-                      </span>
-                    </label>
-                  </div>
                   <form
                     onSubmit={(e: React.FormEvent<HTMLFormElement>) => {
                       e.preventDefault()
@@ -551,6 +546,30 @@ export default function ChatPage() {
                       {sending ? 'Sending...' : 'Send'}
                     </Button>
                   </form>
+                  {/* Streaming Toggle */}
+                  <div className="mt-3 flex items-center justify-end gap-3">
+                    <span className="text-sm font-medium text-foreground">Streaming</span>
+                    <button
+                      type="button"
+                      onClick={() => !sending && setUseStreaming(!useStreaming)}
+                      disabled={sending}
+                      className={`
+                        relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                        focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2
+                        ${useStreaming ? 'bg-primary' : 'bg-muted'}
+                        ${sending ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                      `}
+                      role="switch"
+                      aria-checked={useStreaming}
+                    >
+                      <span
+                        className={`
+                          inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                          ${useStreaming ? 'translate-x-6' : 'translate-x-1'}
+                        `}
+                      />
+                    </button>
+                  </div>
                 </div>
               </>
             ) : (
