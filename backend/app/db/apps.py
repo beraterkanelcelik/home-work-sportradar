@@ -12,4 +12,4 @@ class DbConfig(AppConfig):
     def ready(self):
         # Import models here to avoid circular imports
         # Note: User model is now in app.account.models
-        from .models import session, message  # noqa
+        from .models import session, message, document, chunk  # noqa

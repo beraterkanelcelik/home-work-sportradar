@@ -45,12 +45,54 @@ def create_agent_graph(checkpoint_saver: BaseCheckpointSaver = None) -> StateGra
         }
     )
     
-    # Add edges from greeter and agent to end
-    graph.add_edge("greeter", END)
-    graph.add_edge("agent", END)
+    # Add conditional edges from greeter and agent - check for tool calls
+    def should_continue(state: AgentState) -> str:
+        """Check if agent made tool calls and route accordingly."""
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+        
+        last_message = messages[-1]
+        # Check if last message has tool calls
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            return "tool"
+        return "end"
     
-    # Add conditional edge from tool (can route back to agent or end)
-    graph.add_edge("tool", END)
+    graph.add_conditional_edges(
+        "greeter",
+        should_continue,
+        {
+            "tool": "tool",
+            "end": END,
+        }
+    )
+    
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "tool": "tool",
+            "end": END,
+        }
+    )
+    
+    # After tool execution, route back to the agent that called it
+    def route_after_tool(state: AgentState) -> str:
+        """Route back to the agent that called the tool."""
+        current_agent = state.get("current_agent", "greeter")
+        if current_agent == "greeter":
+            return "greeter"
+        else:
+            return "agent"
+    
+    graph.add_conditional_edges(
+        "tool",
+        route_after_tool,
+        {
+            "greeter": "greeter",
+            "agent": "agent",
+        }
+    )
     
     # Compile with checkpoint if provided
     if checkpoint_saver:

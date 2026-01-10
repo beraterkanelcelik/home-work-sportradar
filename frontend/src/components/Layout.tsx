@@ -60,7 +60,7 @@ export default function Layout() {
           </div>
         </div>
       </nav>
-      <main className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-4 pb-8">
         <Outlet />
       </main>
     </div>

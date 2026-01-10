@@ -62,6 +62,50 @@ def get_session(user_id: int, session_id: int) -> Optional[ChatSession]:
         return None
 
 
+def update_session_model(user_id: int, session_id: int, model_name: str) -> Optional[ChatSession]:
+    """
+    Update the model used for a chat session.
+    
+    Args:
+        user_id: User ID
+        session_id: Session ID
+        model_name: Model name to set
+        
+    Returns:
+        Updated ChatSession object or None if not found
+    """
+    try:
+        session = ChatSession.objects.get(id=session_id, user_id=user_id)
+        session.model_used = model_name
+        session.save(update_fields=['model_used', 'updated_at'])
+        logger.debug(f"Updated model for session {session_id} to {model_name}")
+        return session
+    except ChatSession.DoesNotExist:
+        return None
+
+
+def update_session_title(user_id: int, session_id: int, title: str) -> Optional[ChatSession]:
+    """
+    Update the title of a chat session.
+    
+    Args:
+        user_id: User ID
+        session_id: Session ID
+        title: New title
+        
+    Returns:
+        Updated ChatSession object or None if not found
+    """
+    try:
+        session = ChatSession.objects.get(id=session_id, user_id=user_id)
+        session.title = title
+        session.save(update_fields=['title', 'updated_at'])
+        logger.debug(f"Updated title for session {session_id} to {title}")
+        return session
+    except ChatSession.DoesNotExist:
+        return None
+
+
 def delete_session(user_id: int, session_id: int) -> bool:
     """
     Delete a chat session.
@@ -121,10 +165,9 @@ def add_message(session_id, role, content, tokens_used=0, metadata=None):
         session.tokens_used += tokens_used
         session.save(update_fields=['tokens_used', 'updated_at'])
         
-        # Update user token usage
-        user = session.user
-        user.token_usage_count += tokens_used
-        user.save(update_fields=['token_usage_count'])
+        # Use centralized utility function for token persistence
+        from app.account.utils import increment_user_token_usage
+        increment_user_token_usage(session.user.id, tokens_used)
     else:
         session.save(update_fields=['updated_at'])
     

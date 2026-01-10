@@ -15,7 +15,8 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 supervisor_agent = SupervisorAgent()
-greeter_agent = GreeterAgent()
+# Greeter agent will be created per-request with user_id
+greeter_agent_cache = {}
 
 
 def supervisor_node(state: AgentState) -> AgentState:
@@ -60,6 +61,26 @@ def greeter_node(state: AgentState, config: dict = None) -> AgentState:
     state["current_agent"] = "greeter"
     
     try:
+        # Get or create greeter agent with user_id for RAG tool access
+        user_id = state.get("user_id")
+        chat_session_id = state.get("chat_session_id")
+        
+        # Get model from session if available
+        model_name = None
+        if chat_session_id:
+            try:
+                session = ChatSession.objects.get(id=chat_session_id)
+                if session.model_used:
+                    model_name = session.model_used
+            except ChatSession.DoesNotExist:
+                pass
+        
+        # Create cache key that includes model to ensure model changes are reflected
+        cache_key = f"{user_id}:{model_name or 'default'}"
+        if cache_key not in greeter_agent_cache:
+            greeter_agent_cache[cache_key] = GreeterAgent(user_id=user_id, model_name=model_name)
+        greeter_agent = greeter_agent_cache.get(cache_key, GreeterAgent(user_id=user_id, model_name=model_name))
+        
         # Pass config to agent.invoke() so callbacks propagate to LLM calls
         invoke_kwargs = {}
         if config:
@@ -114,6 +135,9 @@ def greeter_node(state: AgentState, config: dict = None) -> AgentState:
                 if not session.model_used:
                     session.model_used = OPENAI_MODEL
                 
+                # Get tool calls from state (populated by tool_node)
+                tool_calls_metadata = state.get("tool_calls", [])
+                
                 message_obj = MessageModel.objects.create(
                     session=session,
                     role="assistant",
@@ -121,7 +145,7 @@ def greeter_node(state: AgentState, config: dict = None) -> AgentState:
                     tokens_used=tokens_used,
                     metadata={
                         "agent_name": "greeter",
-                        "tool_calls": state.get("tool_calls", []),
+                        "tool_calls": tool_calls_metadata,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cached_tokens": cached_tokens,
@@ -134,9 +158,9 @@ def greeter_node(state: AgentState, config: dict = None) -> AgentState:
                     session.tokens_used += tokens_used
                     session.save(update_fields=['tokens_used', 'model_used'])
                     
-                    user = session.user
-                    user.token_usage_count += tokens_used
-                    user.save(update_fields=['token_usage_count'])
+                    # Use centralized utility function for token persistence
+                    from app.account.utils import increment_user_token_usage
+                    increment_user_token_usage(session.user.id, tokens_used)
                 
                 logger.debug(f"Saved greeter message to database for session {chat_session_id}, tokens: {tokens_used}")
             except ChatSession.DoesNotExist:
@@ -167,6 +191,12 @@ def agent_node(state: AgentState, config: dict = None) -> AgentState:
     messages = state.get("messages", [])
     next_agent_name = state.get("next_agent", "greeter")
     
+    # Validate next_agent_name is not None
+    if not next_agent_name or next_agent_name == "None":
+        logger.warning(f"next_agent is None or 'None', defaulting to greeter")
+        next_agent_name = "greeter"
+        state["next_agent"] = "greeter"
+    
     if not messages:
         return state
     
@@ -189,6 +219,12 @@ def agent_node(state: AgentState, config: dict = None) -> AgentState:
             output_tokens = 0
             cached_tokens = 0
         elif next_agent_name == "greeter":
+            # Get or create greeter agent with user_id for RAG tool access
+            user_id = state.get("user_id")
+            if user_id and user_id not in greeter_agent_cache:
+                greeter_agent_cache[user_id] = GreeterAgent(user_id=user_id)
+            greeter_agent = greeter_agent_cache.get(user_id, GreeterAgent())
+            
             # Greeter agent
             response = greeter_agent.invoke(messages, **invoke_kwargs)
             
@@ -242,6 +278,9 @@ def agent_node(state: AgentState, config: dict = None) -> AgentState:
                 if not session.model_used:
                     session.model_used = OPENAI_MODEL
                 
+                # Get tool calls from state (populated by tool_node)
+                tool_calls_metadata = state.get("tool_calls", [])
+                
                 message_obj = MessageModel.objects.create(
                     session=session,
                     role="assistant",
@@ -249,7 +288,7 @@ def agent_node(state: AgentState, config: dict = None) -> AgentState:
                     tokens_used=tokens_used,
                     metadata={
                         "agent_name": next_agent_name,
-                        "tool_calls": state.get("tool_calls", []),
+                        "tool_calls": tool_calls_metadata,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cached_tokens": cached_tokens,
@@ -262,9 +301,9 @@ def agent_node(state: AgentState, config: dict = None) -> AgentState:
                     session.tokens_used += tokens_used
                     session.save(update_fields=['tokens_used', 'model_used'])
                     
-                    user = session.user
-                    user.token_usage_count += tokens_used
-                    user.save(update_fields=['token_usage_count'])
+                    # Use centralized utility function for token persistence
+                    from app.account.utils import increment_user_token_usage
+                    increment_user_token_usage(session.user.id, tokens_used)
                 
                 logger.debug(f"Saved agent message to database for session {chat_session_id}, tokens: {tokens_used}")
             except ChatSession.DoesNotExist:
@@ -291,7 +330,7 @@ def tool_node(state: AgentState) -> AgentState:
         Updated state with tool results
     """
     messages = state.get("messages", [])
-    current_agent = state.get("current_agent", "supervisor")
+    current_agent = state.get("current_agent", "greeter")
     
     if not messages:
         return state
@@ -300,38 +339,137 @@ def tool_node(state: AgentState) -> AgentState:
     last_message = messages[-1] if messages else None
     
     if not last_message or not hasattr(last_message, 'tool_calls') or not last_message.tool_calls:
+        logger.warning("tool_node called but no tool calls found in last message")
         return state
     
-    # Get tools for current agent
-    tools = tool_registry.get_tools_for_agent(current_agent)
+    logger.info(f"Executing {len(last_message.tool_calls)} tool calls in tool_node for agent {current_agent}")
+    
+    # Get tools for current agent - need to get them from the agent instance
+    # Since tools are created per-user, we need to get them from the agent
+    tools = []
+    user_id = state.get("user_id")
+    
+    if current_agent == "greeter" and user_id:
+        # Get greeter agent with tools
+        # Get model from session if available
+        model_name = None
+        if chat_session_id:
+            try:
+                session = ChatSession.objects.get(id=chat_session_id)
+                if session.model_used:
+                    model_name = session.model_used
+            except ChatSession.DoesNotExist:
+                pass
+        
+        # Create cache key that includes model
+        cache_key = f"{user_id}:{model_name or 'default'}"
+        if cache_key in greeter_agent_cache:
+            greeter_agent = greeter_agent_cache[cache_key]
+            tools = greeter_agent.get_tools()
+        else:
+            greeter_agent = GreeterAgent(user_id=user_id, model_name=model_name)
+            greeter_agent_cache[cache_key] = greeter_agent
+            tools = greeter_agent.get_tools()
+    else:
+        # Fallback to registry
+        tools = tool_registry.get_tools_for_agent(current_agent)
+    
     tool_map = {tool.name: tool for tool in tools}
+    logger.debug(f"Available tools for {current_agent}: {list(tool_map.keys())}")
     
     # Execute tool calls
     tool_results = []
+    from langchain_core.messages import ToolMessage
+    
     for tool_call in last_message.tool_calls:
         tool_name = tool_call.get("name")
+        tool_id = tool_call.get("id")
         tool_args = tool_call.get("args", {})
+        
+        logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
         
         if tool_name in tool_map:
             try:
-                logger.debug(f"Executing tool {tool_name} with args {tool_args}")
                 result = tool_map[tool_name].invoke(tool_args)
+                
+                # Extract document IDs from RAG tool results for reference
+                doc_ids = []
+                if tool_name == "rag_retrieval_tool" and tool_args.get("document_ids"):
+                    doc_ids = tool_args.get("document_ids", [])
+                elif tool_name == "rag_retrieval_tool":
+                    # If no specific document_ids, we'll extract from result citations
+                    # For now, we'll leave it empty - can be enhanced later
+                    pass
+                
+                tool_call_data = {
+                    "tool": tool_name,
+                    "name": tool_name,  # For frontend compatibility
+                    "args": tool_args,
+                    "result": str(result),  # Store as string for JSON serialization
+                    "document_ids": doc_ids,  # Store document IDs for references
+                }
+                
                 tool_results.append({
                     "tool": tool_name,
                     "result": result,
                 })
-                state["tool_calls"].append({
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result": result,
-                })
-                logger.debug(f"Tool {tool_name} executed successfully")
+                
+                # Ensure tool_calls list exists
+                if "tool_calls" not in state:
+                    state["tool_calls"] = []
+                state["tool_calls"].append(tool_call_data)
+                
+                # Also store in metadata for easier access
+                if "metadata" not in state:
+                    state["metadata"] = {}
+                if "tool_calls" not in state["metadata"]:
+                    state["metadata"]["tool_calls"] = []
+                state["metadata"]["tool_calls"].append(tool_call_data)
+                
+                # Add tool result as ToolMessage to state
+                tool_message = ToolMessage(
+                    content=str(result),
+                    tool_call_id=tool_id if tool_id else f"call_{tool_name}",
+                    name=tool_name
+                )
+                state["messages"].append(tool_message)
+                
+                logger.info(f"Tool {tool_name} executed successfully, result length: {len(str(result))}")
             except Exception as e:
                 logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+                error_result = f"Error executing tool: {str(e)}"
                 tool_results.append({
                     "tool": tool_name,
                     "error": str(e),
                 })
+                state["tool_calls"].append({
+                    "tool": tool_name,
+                    "name": tool_name,
+                    "args": tool_args,
+                    "error": str(e),
+                })
+                # Add error as ToolMessage
+                tool_message = ToolMessage(
+                    content=error_result,
+                    tool_call_id=tool_id if tool_id else f"call_{tool_name}",
+                    name=tool_name
+                )
+                state["messages"].append(tool_message)
+        else:
+            logger.warning(f"Tool {tool_name} not found in tool_map. Available tools: {list(tool_map.keys())}")
+            error_result = f"Tool {tool_name} is not available"
+            state["tool_calls"].append({
+                "tool": tool_name,
+                "name": tool_name,
+                "args": tool_args,
+                "error": error_result,
+            })
+            tool_message = ToolMessage(
+                content=error_result,
+                tool_call_id=tool_id if tool_id else f"call_{tool_name}",
+                name=tool_name
+            )
+            state["messages"].append(tool_message)
     
     # Add tool results to state metadata
     state["metadata"]["tool_results"] = tool_results

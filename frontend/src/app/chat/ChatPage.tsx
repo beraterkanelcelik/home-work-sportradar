@@ -5,8 +5,10 @@ import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { createAgentStream, StreamEvent } from '@/lib/streaming'
-import { chatAPI, agentAPI, documentAPI } from '@/lib/api'
+import { chatAPI, agentAPI, documentAPI, modelsAPI } from '@/lib/api'
 import { getErrorMessage } from '@/lib/utils'
+import MarkdownMessage from '@/components/MarkdownMessage'
+import JsonViewer from '@/components/JsonViewer'
 
 
 export default function ChatPage() {
@@ -22,6 +24,9 @@ export default function ChatPage() {
   const [deleteAllDialogOpen, setDeleteAllDialogOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const [selectedOptions, setSelectedOptions] = useState<Array<{type: string, label: string, icon?: React.ReactNode, data?: any}>>([])
+  const [inputFocused, setInputFocused] = useState(false)
   const [attachedFiles, setAttachedFiles] = useState<File[]>([])
   const [waitingForResponse, setWaitingForResponse] = useState(false)
   const [waitingMessageId, setWaitingMessageId] = useState<number | null>(null)
@@ -30,6 +35,15 @@ export default function ChatPage() {
   const [loadingStats, setLoadingStats] = useState(false)
   const [expandedActivities, setExpandedActivities] = useState<string[]>([])
   const [expandedChains, setExpandedChains] = useState<string[]>([])
+  const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-4o-mini')
+  const [availableModels, setAvailableModels] = useState<Array<{id: string, name: string, description: string}>>([])
+  const [headerMoreMenuOpen, setHeaderMoreMenuOpen] = useState(false)
+  const [chatsSectionOpen, setChatsSectionOpen] = useState(true)
+  const [sessionMenuOpen, setSessionMenuOpen] = useState<number | null>(null)
+  const [renameSessionId, setRenameSessionId] = useState<number | null>(null)
+  const [renameSessionTitle, setRenameSessionTitle] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<ReturnType<typeof createAgentStream> | null>(null)
   const initialMessageSentRef = useRef(false)
@@ -57,7 +71,22 @@ export default function ChatPage() {
     if (sessions.length === 0) {
       loadSessions()
     }
-  }, []) // Only run once on mount
+    
+    // Load available models from backend
+    const loadModels = async () => {
+      try {
+        const response = await modelsAPI.getAvailableModels()
+        setAvailableModels(response.data.models || [])
+        // Set default model if none selected
+        if (response.data.models && response.data.models.length > 0 && !selectedModel) {
+          setSelectedModel(response.data.models[0].id)
+        }
+      } catch (error: unknown) {
+        toast.error(getErrorMessage(error, 'Failed to load models'))
+      }
+    }
+    loadModels()
+  }, [loadSessions, selectedModel]) // Only run once on mount
 
   // Store initial message from location state when component mounts or sessionId changes
   useEffect(() => {
@@ -89,6 +118,32 @@ export default function ChatPage() {
     }
   }, [sessionId, loadSession, loadMessages, clearCurrentSession, currentSession])
 
+  // Sync selected model with session model
+  useEffect(() => {
+    if (currentSession?.model_used) {
+      setSelectedModel(currentSession.model_used)
+    } else {
+      setSelectedModel('gpt-4o-mini') // Default
+    }
+  }, [currentSession?.model_used])
+
+  const handleModelChange = async (modelId: string) => {
+    if (!currentSession || modelId === selectedModel) return
+    
+    try {
+      await chatAPI.updateSessionModel(currentSession.id, modelId)
+      setSelectedModel(modelId)
+      // Update currentSession in store
+      if (currentSession) {
+        const updatedSession = { ...currentSession, model_used: modelId }
+        set({ currentSession: updatedSession })
+      }
+      setModelDropdownOpen(false)
+      toast.success(`Model changed to ${availableModels.find(m => m.id === modelId)?.name || modelId}`)
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to update model'))
+    }
+  }
 
   const handleSendWithMessage = useCallback(async (messageContent: string) => {
     if (!messageContent.trim() || sending || !currentSession) return
@@ -242,10 +297,7 @@ export default function ChatPage() {
 
   const handleSelectSession = (id: number) => {
     navigate(`/chat/${id}`)
-    // Keep sidebar open on mobile/tablet, close on desktop for better UX
-    if (window.innerWidth >= 768) {
-      setSidebarOpen(false)
-    }
+    // Keep sidebar open - don't auto-close when selecting a chat
   }
 
   const handleSend = async () => {
@@ -267,10 +319,52 @@ export default function ChatPage() {
     }
   }, [])
 
-  const handleDeleteSession = async (id: number, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleDeleteSession = async (id: number, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation()
+    }
     setSessionToDelete(id)
     setDeleteDialogOpen(true)
+    setHeaderMoreMenuOpen(false)
+    setSessionMenuOpen(null)
+  }
+  
+  const handleDeleteCurrentChat = () => {
+    if (currentSession) {
+      handleDeleteSession(currentSession.id)
+    }
+  }
+
+  const handleRenameSession = (sessionId: number, currentTitle: string) => {
+    setRenameSessionId(sessionId)
+    setRenameSessionTitle(currentTitle || '')
+    setSessionMenuOpen(null)
+  }
+
+  const handleSaveRename = async () => {
+    if (renameSessionId === null) return
+    
+    try {
+      await chatAPI.updateSessionTitle(renameSessionId, renameSessionTitle.trim())
+      await loadSessions()
+      
+      // Update current session if it's the one being renamed
+      if (currentSession?.id === renameSessionId) {
+        const updatedSession = { ...currentSession, title: renameSessionTitle.trim() }
+        set({ currentSession: updatedSession })
+      }
+      
+      setRenameSessionId(null)
+      setRenameSessionTitle('')
+      toast.success('Chat renamed successfully')
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to rename chat'))
+    }
+  }
+
+  const handleCancelRename = () => {
+    setRenameSessionId(null)
+    setRenameSessionTitle('')
   }
 
   const confirmDeleteSession = async () => {
@@ -336,7 +430,6 @@ export default function ChatPage() {
   }, [])
 
   const handleOpenStats = () => {
-    setMoreMenuOpen(false)
     if (currentSession) {
       setStatsDialogOpen(true)
       loadChatStats(currentSession.id)
@@ -349,6 +442,20 @@ export default function ChatPage() {
 
     // Add files to attached files list
     setAttachedFiles((prev) => [...prev, ...files])
+
+    // Add badge for files
+    const fileNames = files.map(f => f.name).join(', ')
+    const fileLabel = files.length === 1 ? fileNames : `${files.length} files`
+    setSelectedOptions((prev) => [...prev, {
+      type: 'files',
+      label: fileLabel,
+      icon: (
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+        </svg>
+      ),
+      data: files
+    }])
 
     // Upload files
     for (const file of files) {
@@ -370,64 +477,187 @@ export default function ChatPage() {
     setAttachedFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
+  // Handle plus menu option selection
+  const handlePlusMenuOption = (optionId: string) => {
+    setPlusMenuOpen(false)
+    
+    if (optionId === 'add_files') {
+      fileInputRef.current?.click()
+    } else if (optionId === 'streaming') {
+      setUseStreaming(!useStreaming)
+    }
+  }
+
+  // Remove selected option badge
+  const removeSelectedOption = (index: number) => {
+    const option = selectedOptions[index]
+    setSelectedOptions((prev) => prev.filter((_, i) => i !== index))
+    
+    // If it was a file option, also remove from attachedFiles
+    if (option.type === 'files' && option.data) {
+      setAttachedFiles((prev) => prev.filter((_, i) => !option.data.includes(i)))
+    }
+  }
+
+  // Handle file selection from plus menu
+  const handleFileSelectionFromPlus = () => {
+    setPlusMenuOpen(false)
+    fileInputRef.current?.click()
+  }
+
   return (
     <>
     <div className="flex h-[calc(100vh-145px)] bg-background">
       {/* Collapsible Sidebar */}
       <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 overflow-hidden border-r flex flex-col bg-background`}>
-        <div className="p-4 border-b space-y-2 min-w-[256px]">
-          <Button onClick={handleNewChat} className="w-full">
-            New Chat
-          </Button>
-          {sessions.length > 0 && (
-            <Button 
-              onClick={handleDeleteAllSessions} 
-              variant="destructive" 
-              className="w-full"
-            >
-              Delete All
-            </Button>
-          )}
-        </div>
         <div className="flex-1 overflow-y-auto min-w-[256px]">
-          {loading && sessions.length === 0 ? (
-            <div className="p-4 text-center text-muted-foreground text-sm">Loading...</div>
-          ) : sessions.length === 0 ? (
-            <div className="p-4 text-center text-muted-foreground text-sm">
-              No chats yet
-            </div>
-          ) : (
-            <div className="divide-y">
-              {sessions.map((session: { id: number; title: string; updated_at: string }) => (
-                <div
-                  key={session.id}
-                  onClick={() => {
-                    handleSelectSession(session.id)
-                  }}
-                  className={`p-3 cursor-pointer hover:bg-muted/50 transition-colors ${
-                    currentSession?.id === session.id ? 'bg-muted/50' : ''
-                  }`}
+          {/* Chats Section Header */}
+          <div className="px-3 py-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setChatsSectionOpen(!chatsSectionOpen)}
+                className="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <span>Chats</span>
+                <svg
+                  className={`w-4 h-4 transition-transform ${chatsSectionOpen ? 'rotate-90' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
                 >
-                  <div className="flex items-start justify-between group">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-sm truncate">
-                        {session.title || 'Untitled Chat'}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {new Date(session.updated_at).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={(e: React.MouseEvent) => handleDeleteSession(session.id, e)}
-                      className="ml-2 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity text-lg leading-none"
-                      title="Delete session"
-                    >
-                      ×
-                    </button>
-                  </div>
-                </div>
-              ))}
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
             </div>
+            {chatsSectionOpen && (
+              <Button onClick={handleNewChat} className="w-full" size="sm">
+                New Chat
+              </Button>
+            )}
+          </div>
+
+          {chatsSectionOpen && (
+            <>
+              {loading && sessions.length === 0 ? (
+                <div className="px-3 py-2 text-center text-muted-foreground text-sm">Loading...</div>
+              ) : sessions.length === 0 ? (
+                <div className="px-3 py-2 text-center text-muted-foreground text-sm">
+                  No chats yet
+                </div>
+              ) : (
+                <div>
+                  {sessions.map((session: { id: number; title: string; updated_at: string }) => (
+                    <div
+                      key={session.id}
+                      className={`group relative px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors ${
+                        currentSession?.id === session.id ? 'bg-muted/50' : ''
+                      }`}
+                    >
+                      {renameSessionId === session.id ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="text"
+                            value={renameSessionTitle}
+                            onChange={(e) => setRenameSessionTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                handleSaveRename()
+                              } else if (e.key === 'Escape') {
+                                handleCancelRename()
+                              }
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex-1 px-2 py-1 text-sm border rounded bg-background"
+                            autoFocus
+                          />
+                          <button
+                            onClick={handleSaveRename}
+                            className="p-1 hover:bg-muted rounded"
+                            title="Save"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={handleCancelRename}
+                            className="p-1 hover:bg-muted rounded"
+                            title="Cancel"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div
+                            onClick={() => {
+                              handleSelectSession(session.id)
+                            }}
+                            className="flex items-center justify-between"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-sm truncate">
+                                {session.title || 'Untitled Chat'}
+                              </p>
+                            </div>
+                            <button
+                              onClick={(e: React.MouseEvent) => {
+                                e.stopPropagation()
+                                setSessionMenuOpen(sessionMenuOpen === session.id ? null : session.id)
+                              }}
+                              className="ml-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-muted rounded"
+                              title="More options"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0z" />
+                              </svg>
+                            </button>
+                          </div>
+
+                          {/* Three-dot menu dropdown */}
+                          {sessionMenuOpen === session.id && (
+                            <>
+                              <div
+                                className="fixed inset-0 z-10"
+                                onClick={() => setSessionMenuOpen(null)}
+                              />
+                              <div className="absolute right-0 top-full mt-1 w-48 bg-background border rounded-lg shadow-lg p-1 z-20">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleRenameSession(session.id, session.title || '')
+                                  }}
+                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md transition-colors text-left text-sm"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                  <span>Rename</span>
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleDeleteSession(session.id, e)
+                                  }}
+                                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md transition-colors text-left text-sm text-destructive"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                  <span>Delete</span>
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -447,35 +677,278 @@ export default function ChatPage() {
         ) : (
           <>
             {/* Minimal Header */}
-            <div className="border-b px-4 py-3 flex items-center justify-between bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-              <div className="flex items-center gap-3">
+            <div className="px-4 py-1 flex items-center justify-between bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+              <div className="flex items-center gap-2">
                 <button
                   onClick={() => setSidebarOpen(!sidebarOpen)}
-                  className="p-1.5 hover:bg-muted rounded-md transition-colors"
+                  className="p-1 hover:bg-muted rounded-md transition-colors"
                   aria-label="Toggle sidebar"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
                   </svg>
                 </button>
-                <h2 className="font-medium text-sm truncate">
-                  {currentSession.title || 'Untitled Chat'}
-                </h2>
+                {/* Model Selection Dropdown */}
+                <div className="relative">
+                  <button
+                    onClick={() => setModelDropdownOpen(!modelDropdownOpen)}
+                    className="flex items-center gap-1 px-2 py-0.5 hover:bg-muted rounded-md transition-colors text-sm"
+                  >
+                    <span className="font-medium">
+                      {availableModels.find(m => m.id === selectedModel)?.name || selectedModel}
+                    </span>
+                    <svg 
+                      className={`w-3 h-3 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`}
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  
+                  {/* Model Dropdown Menu */}
+                  {modelDropdownOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-10"
+                        onClick={() => setModelDropdownOpen(false)}
+                      />
+                      <div className="absolute top-full left-0 mt-1 w-56 bg-background border rounded-lg shadow-lg p-1 z-20">
+                        {availableModels.map((model) => (
+                          <button
+                            key={model.id}
+                            onClick={() => handleModelChange(model.id)}
+                            className={`w-full flex flex-col items-start px-3 py-2 hover:bg-muted rounded-md transition-colors text-left ${
+                              selectedModel === model.id ? 'bg-muted' : ''
+                            }`}
+                          >
+                            <span className="text-sm font-medium">{model.name}</span>
+                            <span className="text-xs text-muted-foreground">{model.description}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                {/* Three dots menu */}
+                <div className="relative">
+                  <button
+                    onClick={() => setHeaderMoreMenuOpen(!headerMoreMenuOpen)}
+                    className="p-1 hover:bg-muted rounded-md transition-colors"
+                    aria-label="More options"
+                    title="More options"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0zm7 0a1 1 0 11-2 0 1 1 0 012 0z" />
+                    </svg>
+                  </button>
+                  
+                  {/* More Menu Dropdown */}
+                  {headerMoreMenuOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-10"
+                        onClick={() => setHeaderMoreMenuOpen(false)}
+                      />
+                      <div className="absolute top-full right-0 mt-1 w-48 bg-background border rounded-lg shadow-lg p-1 z-20">
+                        <button
+                          onClick={() => {
+                            handleOpenStats()
+                            setHeaderMoreMenuOpen(false)
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md transition-colors text-left text-sm"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                          </svg>
+                          <span>Statistics</span>
+                        </button>
+                        {currentSession && (
+                          <button
+                            onClick={() => handleDeleteCurrentChat()}
+                            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md transition-colors text-left text-sm text-destructive"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            <span>Delete chat</span>
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Messages Area */}
             <div className="flex-1 overflow-y-auto">
-              <div className="max-w-3xl mx-auto px-4 py-8">
-                {messages.length === 0 ? (
-                  <div className="flex items-center justify-center h-full">
-                    <div className="text-center">
-                      <p className="text-muted-foreground text-sm">
-                        Start a conversation by typing a message below
-                      </p>
+              {messages.length === 0 ? (
+                <div className="flex items-center justify-center min-h-[60vh]">
+                  <div className="w-full max-w-2xl px-4">
+                    <div className="text-center mb-8">
+                      <h2 className="text-4xl font-light text-foreground/80 mb-2">
+                        What can I help with?
+                      </h2>
+                    </div>
+                    {/* Centered Input Area */}
+                    <div className="relative">
+                      {/* Selected Options Badges */}
+                      {selectedOptions.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-3 justify-center">
+                          {selectedOptions.map((option, idx) => (
+                            <div
+                              key={idx}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 text-primary text-sm"
+                            >
+                              {option.icon}
+                              <span>{option.label}</span>
+                              <button
+                                onClick={() => removeSelectedOption(idx)}
+                                className="ml-1 hover:bg-primary/20 rounded-full p-0.5 transition-colors"
+                                aria-label="Remove"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      
+                      {/* Input Bar */}
+                      <div className="relative flex flex-col bg-background border rounded-2xl shadow-sm">
+                        {/* Textarea Area */}
+                        <textarea
+                          value={input}
+                          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+                            setInput(e.target.value)
+                            e.target.style.height = 'auto'
+                            e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`
+                          }}
+                          onFocus={() => setInputFocused(true)}
+                          onBlur={() => setInputFocused(false)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault()
+                              handleSend()
+                            }
+                          }}
+                          placeholder="Ask anything"
+                          className="flex-1 min-h-[52px] max-h-[200px] px-4 pt-3 pb-2 border-0 bg-transparent resize-none focus:outline-none text-[15px] leading-relaxed"
+                          disabled={sending}
+                          rows={1}
+                        />
+
+                        {/* Bottom Controls */}
+                        <div className="flex items-center justify-between px-3 pb-2.5">
+                          {/* Plus Button */}
+                          <div className="relative flex-shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+                              className="w-8 h-8 rounded-full hover:bg-muted flex items-center justify-center transition-colors"
+                              aria-label="More options"
+                              disabled={sending}
+                            >
+                              <svg className="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                              </svg>
+                            </button>
+                            
+                            {/* Plus Menu Dropdown */}
+                            {plusMenuOpen && (
+                              <>
+                                <div
+                                  className="fixed inset-0 z-10"
+                                  onClick={() => setPlusMenuOpen(false)}
+                                />
+                                <div className="absolute bottom-full left-0 mb-2 w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
+                                  <button
+                                    type="button"
+                                    onClick={handleFileSelectionFromPlus}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted rounded-md text-sm text-left transition-colors"
+                                  >
+                                    <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                                    </svg>
+                                    <span>Add photos & files</span>
+                                  </button>
+                                  <div className="flex items-center justify-between px-3 py-2.5 hover:bg-muted rounded-md cursor-pointer transition-colors">
+                                    <div className="flex items-center gap-3">
+                                      <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                      </svg>
+                                      <span className="text-sm">Streaming</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => !sending && setUseStreaming(!useStreaming)}
+                                      disabled={sending}
+                                      className={`
+                                        relative inline-flex h-5 w-9 items-center rounded-full transition-colors
+                                        focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2
+                                        ${useStreaming ? 'bg-primary' : 'bg-muted'}
+                                        ${sending ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                                      `}
+                                      aria-checked={useStreaming}
+                                      role="switch"
+                                    >
+                                      <span
+                                        className={`
+                                          inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                                          ${useStreaming ? 'translate-x-5' : 'translate-x-0.5'}
+                                        `}
+                                      />
+                                    </button>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted rounded-md text-sm text-left transition-colors"
+                                    disabled
+                                  >
+                                    <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                                    </svg>
+                                    <span className="text-muted-foreground">... More</span>
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            multiple
+                            onChange={handleFileSelect}
+                            className="hidden"
+                            disabled={sending}
+                          />
+
+                          {/* Send Button */}
+                          <button
+                            type="submit"
+                            onClick={handleSend}
+                            disabled={sending || (!input.trim() && attachedFiles.length === 0)}
+                            className="p-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Send message"
+                          >
+                            <svg className="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                ) : (
+                </div>
+              ) : (
+                <div className="max-w-3xl mx-auto px-4 py-8">
                   <div className="space-y-6">
                     {messages.map((msg: Message) => {
                       const agentName = getAgentName(msg)
@@ -503,7 +976,7 @@ export default function ChatPage() {
                               className={`rounded-2xl px-4 py-3 inline-block ${
                                 msg.role === 'user'
                                   ? 'bg-primary text-primary-foreground'
-                                  : 'bg-muted'
+                                  : 'bg-muted text-foreground'
                               }`}
                             >
                               {isWaiting ? (
@@ -530,12 +1003,140 @@ export default function ChatPage() {
                                     }}
                                   ></span>
                                 </div>
-                              ) : (
+                              ) : msg.role === 'user' ? (
                                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
                                   {msg.content}
                                 </p>
+                              ) : (
+                                <MarkdownMessage content={msg.content} />
                               )}
                             </div>
+                            {/* Tool calls - collapsible boxes (displayed at end of message) */}
+                            {msg.role === 'assistant' && msg.metadata?.tool_calls && Array.isArray(msg.metadata.tool_calls) && msg.metadata.tool_calls.length > 0 && (
+                              <div className="mt-3 px-1 space-y-2">
+                                {msg.metadata.tool_calls.map((toolCall: any, idx: number) => {
+                                  const toolCallId = `tool-${msg.id}-${idx}`
+                                  const isExpanded = expandedToolCalls.has(toolCallId)
+                                  const toolName = toolCall.tool || toolCall.name || 'Tool'
+                                  
+                                  // Extract document references from RAG tool results
+                                  const extractDocReferences = (result: string) => {
+                                    const docRefs: Array<{ title: string; page?: number }> = []
+                                    // Look for patterns like [Document Title, page X] or [Document Title]
+                                    const refPattern = /\[([^\]]+?)(?:,\s*page\s+(\d+))?\]/g
+                                    let match
+                                    while ((match = refPattern.exec(result)) !== null) {
+                                      const title = match[1].trim()
+                                      const page = match[2] ? parseInt(match[2]) : undefined
+                                      if (title && !docRefs.find(ref => ref.title === title && ref.page === page)) {
+                                        docRefs.push({ title, page })
+                                      }
+                                    }
+                                    return docRefs
+                                  }
+                                  
+                                  const docReferences = toolCall.result ? extractDocReferences(String(toolCall.result)) : []
+                                  
+                                  return (
+                                    <div
+                                      key={idx}
+                                      className="border rounded-lg bg-muted/30 overflow-hidden"
+                                    >
+                                      <button
+                                        onClick={() => {
+                                          setExpandedToolCalls((prev) => {
+                                            const next = new Set(prev)
+                                            if (next.has(toolCallId)) {
+                                              next.delete(toolCallId)
+                                            } else {
+                                              next.add(toolCallId)
+                                            }
+                                            return next
+                                          })
+                                        }}
+                                        className="w-full px-3 py-2 flex items-center justify-between hover:bg-muted/50 transition-colors"
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          <svg className="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                          </svg>
+                                          <span className="text-sm font-medium">{toolName}</span>
+                                          {docReferences.length > 0 && (
+                                            <span className="text-xs text-muted-foreground">
+                                              ({docReferences.length} {docReferences.length === 1 ? 'document' : 'documents'})
+                                            </span>
+                                          )}
+                                        </div>
+                                        <svg
+                                          className={`w-4 h-4 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                          fill="none"
+                                          stroke="currentColor"
+                                          viewBox="0 0 24 24"
+                                        >
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                        </svg>
+                                      </button>
+                                      
+                                      {isExpanded && (
+                                        <div className="px-3 py-2 border-t bg-muted/20 space-y-3">
+                                          {/* Tool arguments */}
+                                          {toolCall.args && (
+                                            <div>
+                                              <div className="text-xs font-semibold text-muted-foreground mb-1">Arguments</div>
+                                              <div className="text-xs font-mono bg-background/50 p-2 rounded">
+                                                {typeof toolCall.args === 'string' 
+                                                  ? toolCall.args 
+                                                  : JSON.stringify(toolCall.args, null, 2)}
+                                              </div>
+                                            </div>
+                                          )}
+                                          
+                                          {/* Document references */}
+                                          {docReferences.length > 0 && (
+                                            <div>
+                                              <div className="text-xs font-semibold text-muted-foreground mb-1">Document References</div>
+                                              <div className="flex flex-wrap gap-1.5">
+                                                {docReferences.map((ref, refIdx) => (
+                                                  <button
+                                                    key={refIdx}
+                                                    onClick={() => {
+                                                      // Navigate to documents page and open preview
+                                                      navigate('/documents')
+                                                      // Could enhance this to open specific document preview
+                                                    }}
+                                                    className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-800 transition-colors cursor-pointer"
+                                                  >
+                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                    </svg>
+                                                    {ref.title}
+                                                    {ref.page && <span className="text-muted-foreground"> (p. {ref.page})</span>}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+                                          
+                                          {/* Tool result preview */}
+                                          {toolCall.result && (
+                                            <div>
+                                              <div className="text-xs font-semibold text-muted-foreground mb-1">Result Preview</div>
+                                              <div className="max-h-64 overflow-auto border rounded bg-background/50 p-2">
+                                                <JsonViewer 
+                                                  data={toolCall.result} 
+                                                  collapsed={2}
+                                                />
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
                           </div>
                           {msg.role === 'user' && (
                             <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0 mt-1">
@@ -586,38 +1187,36 @@ export default function ChatPage() {
                     )}
                     <div ref={messagesEndRef} />
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
-            {/* Input Area */}
-            <div className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-              <div className="max-w-3xl mx-auto px-4 py-4">
+            {/* Input Area - Only show when messages exist */}
+            {messages.length > 0 && (
+              <div className="bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 animate-slide-up">
+              <div className="max-w-3xl mx-auto px-4 pt-2 pb-1">
                 {error && (
                   <div className="mb-3 p-3 bg-destructive/10 text-destructive text-sm rounded-lg">
                     {error}
                   </div>
                 )}
                 
-                {/* Attached Files */}
-                {attachedFiles.length > 0 && (
+                {/* Selected Options Badges */}
+                {selectedOptions.length > 0 && (
                   <div className="mb-3 flex flex-wrap gap-2">
-                    {attachedFiles.map((file, index) => (
+                    {selectedOptions.map((option, idx) => (
                       <div
-                        key={index}
-                        className="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-lg text-sm"
+                        key={idx}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 text-primary text-sm"
                       >
-                        <svg className="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        <span className="text-xs truncate max-w-[150px]">{file.name}</span>
+                        {option.icon}
+                        <span>{option.label}</span>
                         <button
-                          type="button"
-                          onClick={() => handleRemoveFile(index)}
-                          className="text-muted-foreground hover:text-foreground"
-                          aria-label="Remove file"
+                          onClick={() => removeSelectedOption(idx)}
+                          className="ml-1 hover:bg-primary/20 rounded-full p-0.5 transition-colors"
+                          aria-label="Remove"
                         >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                           </svg>
                         </button>
@@ -633,28 +1232,8 @@ export default function ChatPage() {
                   }}
                   className="relative"
                 >
-                  <div className="relative flex items-end gap-2">
-                    {/* File Attachment Button */}
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="p-2.5 hover:bg-muted rounded-lg transition-colors flex-shrink-0"
-                      aria-label="Attach file"
-                      disabled={sending}
-                    >
-                      <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                      </svg>
-                    </button>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      onChange={handleFileSelect}
-                      className="hidden"
-                      disabled={sending}
-                    />
-
+                  <div className="relative flex flex-col bg-background border rounded-2xl shadow-sm">
+                    {/* Textarea Area */}
                     <textarea
                       value={input}
                       onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -663,6 +1242,8 @@ export default function ChatPage() {
                         e.target.style.height = 'auto'
                         e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`
                       }}
+                      onFocus={() => setInputFocused(true)}
+                      onBlur={() => setInputFocused(false)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault()
@@ -670,93 +1251,115 @@ export default function ChatPage() {
                         }
                       }}
                       placeholder="Message..."
-                      className="flex-1 min-h-[52px] max-h-[200px] px-4 py-3 pr-24 border rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
+                      className="flex-1 min-h-[52px] max-h-[200px] px-4 pt-3 pb-2 border-0 bg-transparent resize-none focus:outline-none text-[15px] leading-relaxed"
                       disabled={sending}
                       rows={1}
                     />
-                    
-                    {/* More Menu Button */}
-                    <div className="relative flex-shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setMoreMenuOpen(!moreMenuOpen)}
-                        className="p-2.5 hover:bg-muted rounded-lg transition-colors"
-                        aria-label="More options"
-                        disabled={sending}
-                      >
-                        <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                        </svg>
-                      </button>
-                      
-                      {/* More Menu Dropdown */}
-                      {moreMenuOpen && (
-                        <>
-                          <div
-                            className="fixed inset-0 z-10"
-                            onClick={() => setMoreMenuOpen(false)}
-                          />
-                          <div className="absolute bottom-full right-0 mb-2 w-56 bg-background border rounded-lg shadow-lg p-2 z-20">
-                            <button
-                              type="button"
-                              onClick={handleOpenStats}
-                              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md text-sm text-left"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                              </svg>
-                              <span>Statistics</span>
-                            </button>
-                            <div className="flex items-center justify-between px-3 py-2 hover:bg-muted rounded-md cursor-pointer">
-                              <span className="text-sm">Streaming</span>
+
+                    {/* Bottom Controls */}
+                    <div className="flex items-center justify-between px-3 pb-2.5">
+                      {/* Plus Button */}
+                      <div className="relative flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+                          className="w-8 h-8 rounded-full hover:bg-muted flex items-center justify-center transition-colors"
+                          aria-label="More options"
+                          disabled={sending}
+                        >
+                          <svg className="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          </svg>
+                        </button>
+                        
+                        {/* Plus Menu Dropdown */}
+                        {plusMenuOpen && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-10"
+                              onClick={() => setPlusMenuOpen(false)}
+                            />
+                            <div className="absolute bottom-full left-0 mb-2 w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
                               <button
                                 type="button"
-                                onClick={() => !sending && setUseStreaming(!useStreaming)}
-                                disabled={sending}
-                                className={`
-                                  relative inline-flex h-5 w-9 items-center rounded-full transition-colors
-                                  focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2
-                                  ${useStreaming ? 'bg-primary' : 'bg-muted'}
-                                  ${sending ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
-                                `}
-                                role="switch"
-                                aria-checked={useStreaming}
+                                onClick={handleFileSelectionFromPlus}
+                                className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted rounded-md text-sm text-left transition-colors"
                               >
-                                <span
+                                <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                                </svg>
+                                <span>Add photos & files</span>
+                              </button>
+                              <div className="flex items-center justify-between px-3 py-2.5 hover:bg-muted rounded-md cursor-pointer transition-colors">
+                                <div className="flex items-center gap-3">
+                                  <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                  </svg>
+                                  <span className="text-sm">Streaming</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => !sending && setUseStreaming(!useStreaming)}
+                                  disabled={sending}
                                   className={`
-                                    inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform
-                                    ${useStreaming ? 'translate-x-5' : 'translate-x-0.5'}
+                                    relative inline-flex h-5 w-9 items-center rounded-full transition-colors
+                                    focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2
+                                    ${useStreaming ? 'bg-primary' : 'bg-muted'}
+                                    ${sending ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
                                   `}
-                                />
+                                  aria-checked={useStreaming}
+                                  role="switch"
+                                >
+                                  <span
+                                    className={`
+                                      inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                                      ${useStreaming ? 'translate-x-5' : 'translate-x-0.5'}
+                                    `}
+                                  />
+                                </button>
+                              </div>
+                              <button
+                                type="button"
+                                className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-muted rounded-md text-sm text-left transition-colors"
+                                disabled
+                              >
+                                <svg className="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                                </svg>
+                                <span className="text-muted-foreground">... More</span>
                               </button>
                             </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
+                          </>
+                        )}
+                      </div>
 
-                    {/* Send Button */}
-                    <button
-                      type="submit"
-                      disabled={sending || (!input.trim() && attachedFiles.length === 0)}
-                      className="p-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
-                      aria-label="Send message"
-                    >
-                      {sending ? (
-                        <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                      ) : (
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        onChange={handleFileSelect}
+                        className="hidden"
+                        disabled={sending}
+                      />
+
+                      {/* Send Button */}
+                      <button
+                        type="submit"
+                        onClick={handleSend}
+                        disabled={sending || (!input.trim() && attachedFiles.length === 0)}
+                        className="p-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Send message"
+                      >
+                        <svg className="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                         </svg>
-                      )}
-                    </button>
+                      </button>
+                    </div>
                   </div>
                 </form>
               </div>
             </div>
+            )}
           </>
         )}
       </div>
@@ -989,6 +1592,33 @@ export default function ChatPage() {
                         {chains.map((chain) => {
                           const isChainExpanded = !expandedChains.includes(chain.trace_id)
                           
+                          // Find the user message for this chain
+                          // Look for the first activity that has a user message or input_preview
+                          const userMessage = chain.activities.find((activity: any) => 
+                            activity.category === 'llm' && activity.input_preview
+                          )?.input_preview || 
+                          chain.activities.find((activity: any) => 
+                            activity.message
+                          )?.message ||
+                          // Try to find matching user message from messages array by timestamp
+                          (() => {
+                            if (!chain.first_timestamp) return null
+                            const chainTime = new Date(chain.first_timestamp).getTime()
+                            const userMsg = messages.find((msg: Message) => {
+                              if (msg.role !== 'user') return false
+                              const msgTime = new Date(msg.created_at).getTime()
+                              // Match if within 5 seconds
+                              return Math.abs(msgTime - chainTime) < 5000
+                            })
+                            return userMsg?.content || null
+                          })() ||
+                          'No message preview available'
+                          
+                          // Truncate long messages
+                          const displayMessage = typeof userMessage === 'string' 
+                            ? (userMessage.length > 100 ? userMessage.substring(0, 100) + '...' : userMessage)
+                            : 'No message preview available'
+                          
                           return (
                             <div key={chain.trace_id} className="border rounded-lg p-3 bg-muted/20">
                               {/* Chain Header - Collapsible */}
@@ -1003,7 +1633,7 @@ export default function ChatPage() {
                                 }}
                               >
                                 <div className="flex-1">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 flex-wrap">
                                     <svg
                                       className={`w-4 h-4 text-muted-foreground transition-transform ${isChainExpanded ? 'rotate-90' : ''}`}
                                       fill="none"
@@ -1012,7 +1642,8 @@ export default function ChatPage() {
                                     >
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                                     </svg>
-                                    <span className="font-semibold text-sm">Message Chain</span>
+                                    <span className="font-semibold text-sm text-muted-foreground">Message:</span>
+                                    <span className="text-sm font-medium">{displayMessage}</span>
                                     {chain.agents.length > 0 && (
                                       <div className="flex gap-1">
                                         {chain.agents.map((agent: string) => (
@@ -1025,6 +1656,11 @@ export default function ChatPage() {
                                     <span className="text-xs text-muted-foreground">
                                       {chain.activities.length} {chain.activities.length === 1 ? 'activity' : 'activities'}
                                     </span>
+                                  </div>
+                                  <div className="text-xs text-muted-foreground mt-1 ml-6">
+                                    {displayMessage !== 'No message preview available' && displayMessage.length > 100 && (
+                                      <span className="italic">(truncated)</span>
+                                    )}
                                   </div>
                                   {chain.first_timestamp && (
                                     <div className="text-xs text-muted-foreground mt-1 ml-6">

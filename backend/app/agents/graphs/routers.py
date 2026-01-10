@@ -37,6 +37,11 @@ def route_message(state: AgentState, config: dict = None) -> Literal["greeter", 
         agent_name = supervisor.route_message(messages, **invoke_kwargs)
         logger.debug(f"Supervisor routed to agent: {agent_name}")
         
+        # Validate agent_name is not None or empty
+        if not agent_name or agent_name.strip() == "":
+            logger.warning("Supervisor returned None or empty agent name, defaulting to greeter")
+            return "greeter"
+        
         if agent_name == "greeter":
             return "greeter"
         else:

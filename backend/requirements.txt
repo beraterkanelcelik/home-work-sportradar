@@ -31,3 +31,12 @@ djangorestframework-simplejwt>=5.3.0
 
 # CORS
 django-cors-headers>=4.3.0
+
+# PDF extraction
+pypdf>=3.0.0
+
+# Vector database support
+pgvector>=0.2.0
+
+# Reranking
+cohere>=4.0.0

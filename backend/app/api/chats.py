@@ -16,6 +16,8 @@ from app.services.chat_service import (
     add_message,
     get_messages,
     get_session_stats,
+    update_session_model,
+    update_session_title,
 )
 
 logger = get_logger(__name__)
@@ -65,9 +67,9 @@ def chat_sessions(request):
 
 
 @csrf_exempt
-@require_http_methods(["GET", "DELETE"])
+@require_http_methods(["GET", "DELETE", "PATCH"])
 def chat_session_detail(request, session_id):
-    """Get or delete specific chat session."""
+    """Get, update, or delete specific chat session."""
     user = get_current_user(request)
     if not user:
         return JsonResponse(
@@ -92,6 +94,47 @@ def chat_session_detail(request, session_id):
             'created_at': session.created_at.isoformat(),
             'updated_at': session.updated_at.isoformat(),
         })
+    
+    elif request.method == 'PATCH':
+        # Update chat session (e.g., model or title)
+        try:
+            data = json.loads(request.body) if request.body else {}
+            model_name = data.get('model_used')
+            title = data.get('title')
+            
+            session = get_session(user.id, session_id)
+            if not session:
+                return JsonResponse(
+                    {'error': 'Chat session not found'},
+                    status=404
+                )
+            
+            updated_fields = []
+            if model_name is not None:
+                session = update_session_model(user.id, session_id, model_name)
+                updated_fields.append('model_used')
+            
+            if title is not None:
+                session = update_session_title(user.id, session_id, title)
+                updated_fields.append('title')
+            
+            if not updated_fields:
+                return JsonResponse(
+                    {'error': 'No fields to update. Provide model_used or title.'},
+                    status=400
+                )
+            
+            return JsonResponse({
+                'id': session.id,
+                'title': session.title,
+                'model_used': session.model_used,
+                'message': 'Session updated successfully'
+            })
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        except Exception as e:
+            logger.error(f"Error updating session: {e}", exc_info=True)
+            return JsonResponse({'error': str(e)}, status=500)
     
     elif request.method == 'DELETE':
         # Delete chat session

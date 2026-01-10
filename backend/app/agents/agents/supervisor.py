@@ -65,8 +65,17 @@ Respond with ONLY the agent name (e.g., "greeter" or "gmail"). Do not include an
             response = self.invoke(messages, **kwargs)
             
             # Extract agent name from response
+            if not response or not hasattr(response, 'content') or not response.content:
+                logger.warning("Supervisor response is empty or invalid, defaulting to greeter")
+                return "greeter"
+            
             agent_name = response.content.strip().lower()
-            logger.debug(f"Supervisor routing decision: {agent_name}")
+            logger.debug(f"Supervisor routing decision: '{agent_name}'")
+            
+            # Handle None or empty string
+            if not agent_name or agent_name == "none":
+                logger.warning("Supervisor returned 'none' or empty, defaulting to greeter")
+                return "greeter"
             
             # Validate agent name
             if agent_name in self.AVAILABLE_AGENTS:

@@ -8,7 +8,9 @@ import { getErrorMessage } from '@/lib/utils'
 
 interface Document {
   id: number
-  name: string
+  title: string
+  status: 'UPLOADED' | 'EXTRACTED' | 'INDEXING' | 'READY' | 'FAILED'
+  chunks_count: number
   created_at: string
   updated_at: string
 }
@@ -27,7 +29,8 @@ export default function DashboardPage() {
     setLoading(true)
     try {
       const response = await documentAPI.getDocuments()
-      setDocuments(response.data.documents || [])
+      // Backend returns { results: [...], count, page, ... }
+      setDocuments(response.data.results || [])
     } catch (error: unknown) {
       // Documents endpoint might not be implemented yet - silently fail
     } finally {
@@ -107,9 +110,10 @@ export default function DashboardPage() {
                           </svg>
                         </div>
                         <div>
-                          <h3 className="font-medium text-sm">{doc.name}</h3>
+                          <h3 className="font-medium text-sm">{doc.title}</h3>
                           <p className="text-xs text-muted-foreground mt-1">
                             {new Date(doc.updated_at).toLocaleDateString()}
+                            {doc.status === 'READY' && doc.chunks_count > 0 && ` • ${doc.chunks_count} chunks`}
                           </p>
                         </div>
                       </div>

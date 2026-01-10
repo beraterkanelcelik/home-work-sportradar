@@ -30,7 +30,7 @@ class BaseAgent(ABC):
     Provides common functionality for LLM integration and tool handling.
     """
     
-    def __init__(self, name: str, description: str, temperature: float = 0.7):
+    def __init__(self, name: str, description: str, temperature: float = 0.7, model_name: str = None):
         """
         Initialize base agent.
         
@@ -38,14 +38,16 @@ class BaseAgent(ABC):
             name: Agent name/identifier
             description: Agent description for routing
             temperature: LLM temperature
+            model_name: Optional model name (defaults to OPENAI_MODEL)
         """
         self.name = name
         self.description = description
+        self._model_name = model_name or OPENAI_MODEL
         
         # LLM initialization - callbacks are passed via config at invocation time
         # This allows LangGraph to handle callback propagation automatically
         self.llm = ChatOpenAI(
-            model=OPENAI_MODEL,
+            model=self._model_name,
             temperature=temperature,
             api_key=OPENAI_API_KEY,
             streaming=True,

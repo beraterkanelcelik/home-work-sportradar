@@ -312,9 +312,9 @@ def stream_agent_events(
             # Create graph with checkpoint
             graph = create_agent_graph(checkpoint_saver=checkpoint_saver)
             
-            # Stream using LangGraph's native streaming with stream_mode=["messages", "updates"]
-            # "messages" streams LLM tokens, "updates" streams state updates
-            # This automatically creates the proper chain structure (supervisor → greeter → LLM)
+            # Stream using LangGraph's native streaming with stream_mode=["messages", "values"]
+            # "messages" streams LLM tokens for real-time display
+            # "values" streams full state after each step (ensures we capture tool_calls reliably)
             accumulated_content = ""
             tokens_used = 0
             input_tokens = 0
@@ -325,18 +325,28 @@ def stream_agent_events(
             
             if LANGFUSE_ENABLED:
                 with propagate_attributes(**trace_context):
-                    # Stream graph execution with both messages and updates modes
-                    # When using multiple modes, events are tuples: (mode, data)
+                    # Stream graph execution - values mode gives us complete state including tool_calls
                     for event in graph.stream(
                         initial_state,
                         config=config,
-                        stream_mode=["messages", "updates"]
+                        stream_mode=["messages", "values"]
                     ):
                         # event is a tuple: (mode, data) when using multiple stream modes
                         if isinstance(event, tuple) and len(event) == 2:
                             mode, data = event
                             
-                            if mode == "messages":
+                            if mode == "values":
+                                # Full state after each step - this is our source of truth for tool_calls
+                                if isinstance(data, dict):
+                                    final_state = data.copy()
+                                    # Track current agent
+                                    if "current_agent" in data:
+                                        selected_agent_name = data.get("current_agent")
+                                    # Log tool_calls if present
+                                    if "tool_calls" in data and isinstance(data["tool_calls"], list) and len(data["tool_calls"]) > 0:
+                                        logger.info(f"Values mode: Found {len(data['tool_calls'])} tool_calls in state")
+                            
+                            elif mode == "messages":
                                 # data is a tuple: (message_chunk, metadata)
                                 if isinstance(data, tuple) and len(data) == 2:
                                     message_chunk, metadata = data
@@ -372,19 +382,64 @@ def stream_agent_events(
                                     # Track current agent and final state
                                     if "current_agent" in data:
                                         selected_agent_name = data.get("current_agent")
-                                    # Keep track of final state
-                                    final_state = data
+                                    # Merge state updates (LangGraph updates may be partial)
+                                    if final_state is None:
+                                        final_state = data.copy()
+                                        logger.debug(f"Initialized final_state with {len(data.get('tool_calls', []))} tool calls")
+                                    else:
+                                        # Merge updates into final_state, preserving tool_calls
+                                        existing_tool_calls = final_state.get("tool_calls", [])
+                                        for key, value in data.items():
+                                            if key == "tool_calls":
+                                                # For tool_calls, always use the latest value if it's a non-empty list
+                                                # Otherwise preserve existing tool_calls
+                                                if isinstance(value, list) and len(value) > 0:
+                                                    # New tool_calls found, use them
+                                                    logger.debug(f"State update has {len(value)} tool calls, replacing existing {len(existing_tool_calls)}")
+                                                    final_state[key] = value
+                                                elif isinstance(value, list) and len(value) == 0:
+                                                    # Empty list - preserve existing if we have any
+                                                    if existing_tool_calls:
+                                                        logger.debug(f"State update has empty tool_calls, preserving existing {len(existing_tool_calls)}")
+                                                        # Keep existing, don't overwrite
+                                                    else:
+                                                        final_state[key] = value
+                                                elif key not in final_state:
+                                                    # No existing tool_calls, use new value
+                                                    final_state[key] = value
+                                                # Otherwise keep existing tool_calls
+                                            elif key == "messages" and isinstance(value, list):
+                                                # For messages, replace (messages are always complete)
+                                                final_state[key] = value
+                                            else:
+                                                # For other fields, update normally
+                                                final_state[key] = value
+                                    # Log tool_calls if present in this update
+                                    if "tool_calls" in data:
+                                        logger.info(f"State update includes {len(data.get('tool_calls', []))} tool calls")
+                                    # Also log current total
+                                    if "tool_calls" in final_state:
+                                        logger.info(f"Final state now has {len(final_state.get('tool_calls', []))} total tool calls")
             else:
                 # Non-Langfuse path
                 for event in graph.stream(
                     initial_state,
                     config=config,
-                    stream_mode=["messages", "updates"]
+                    stream_mode=["messages", "updates", "values"]
                 ):
                     if isinstance(event, tuple) and len(event) == 2:
                         mode, data = event
                         
-                        if mode == "messages":
+                        if mode == "values":
+                            # Full state after each step
+                            if isinstance(data, dict):
+                                final_state = data.copy()
+                                if "current_agent" in data:
+                                    selected_agent_name = data.get("current_agent")
+                                if "tool_calls" in data and isinstance(data["tool_calls"], list) and len(data["tool_calls"]) > 0:
+                                    logger.info(f"Values mode: Found {len(data['tool_calls'])} tool_calls in state")
+                        
+                        elif mode == "messages":
                             if isinstance(data, tuple) and len(data) == 2:
                                 message_chunk, metadata = data
                                 
@@ -401,17 +456,17 @@ def stream_agent_events(
                                             else:
                                                 accumulated_content += chunk_content
                                                 yield {"type": "token", "data": chunk_content}
-                        
-                        elif mode == "updates":
-                            if isinstance(data, dict):
-                                if "current_agent" in data:
-                                    selected_agent_name = data.get("current_agent")
-                                final_state = data
             
             # Extract agent name from final state or use default
             if not selected_agent_name:
-                # Try to get from final state or use greeter as default
-                selected_agent_name = "greeter"
+                selected_agent_name = final_state.get("current_agent", "greeter") if final_state else "greeter"
+        
+        # Log final state for debugging
+        if final_state:
+            tool_calls_in_state = final_state.get("tool_calls", [])
+            logger.info(f"Final state has {len(tool_calls_in_state)} tool calls")
+        else:
+            logger.warning("Final state is None - tool_calls may not be saved")
         
         # Extract token usage from final state if not already captured from streaming chunks
         if tokens_used == 0 and accumulated_content and final_state:
@@ -456,6 +511,25 @@ def stream_agent_events(
                     session.model_used = OPENAI_MODEL
                     session.save(update_fields=['model_used'])
                 
+                # Get tool calls from final state (values mode ensures we have the complete state)
+                tool_calls_metadata = []
+                if final_state:
+                    tool_calls_metadata = final_state.get("tool_calls", [])
+                    # Also check metadata as backup
+                    if not tool_calls_metadata and "metadata" in final_state:
+                        tool_calls_metadata = final_state["metadata"].get("tool_calls", [])
+                
+                # Ensure tool_calls is a list and each item is a dict
+                if not isinstance(tool_calls_metadata, list):
+                    logger.warning(f"tool_calls is not a list: {type(tool_calls_metadata)}, converting")
+                    tool_calls_metadata = []
+                # Filter out any non-dict items and ensure all required fields
+                tool_calls_metadata = [
+                    tc for tc in tool_calls_metadata 
+                    if isinstance(tc, dict) and (tc.get('tool') or tc.get('name'))
+                ]
+                logger.info(f"Saving message with {len(tool_calls_metadata)} tool calls: {[tc.get('tool', tc.get('name', 'unknown')) for tc in tool_calls_metadata]}")
+                
                 message_obj = MessageModel.objects.create(
                     session=session,
                     role="assistant",
@@ -463,23 +537,22 @@ def stream_agent_events(
                     tokens_used=tokens_used,
                     metadata={
                         "agent_name": selected_agent_name or "greeter",
-                        "tool_calls": [],
+                        "tool_calls": tool_calls_metadata,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cached_tokens": cached_tokens,
                         "model": OPENAI_MODEL,
                     }
                 )
+                logger.debug(f"Saved message {message_obj.id} with metadata: {message_obj.metadata}")
                 
                 if tokens_used > 0:
                     session.tokens_used += tokens_used
                     session.save(update_fields=['tokens_used', 'model_used'])
                     
-                    from django.contrib.auth import get_user_model
-                    User = get_user_model()
-                    user = User.objects.get(id=user_id)
-                    user.token_usage_count += tokens_used
-                    user.save(update_fields=['token_usage_count'])
+                    # Use centralized utility function for token persistence
+                    from app.account.utils import increment_user_token_usage
+                    increment_user_token_usage(user_id, tokens_used)
                 
                 logger.debug(f"Saved streamed message to database, tokens: {tokens_used}")
             except Exception as e:

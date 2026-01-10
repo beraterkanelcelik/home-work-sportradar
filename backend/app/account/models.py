@@ -38,7 +38,10 @@ class User(AbstractUser):
     email = models.EmailField(unique=True, db_index=True)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
-    token_usage_count = models.BigIntegerField(default=0)
+    token_usage_count = models.BigIntegerField(
+        default=0,
+        help_text="Cumulative total token usage. This value is incremented when tokens are used and NEVER decreases, even when chats are deleted. This is the source of truth for all-time token usage."
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -67,6 +70,15 @@ class User(AbstractUser):
         return self.first_name or self.email
     
     def increment_token_usage(self, count=1):
-        """Increment token usage count."""
+        """
+        Increment token usage count.
+        
+        This method should be called whenever tokens are used. The count is cumulative
+        and never decreases, ensuring accurate all-time token tracking even when
+        individual chats or sessions are deleted.
+        
+        Args:
+            count: Number of tokens to add (default: 1)
+        """
         self.token_usage_count += count
         self.save(update_fields=['token_usage_count'])

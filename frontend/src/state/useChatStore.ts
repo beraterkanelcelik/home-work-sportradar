@@ -10,6 +10,7 @@ export interface ChatSession {
   id: number
   title: string
   tokens_used: number
+  model_used?: string | null
   created_at: string
   updated_at: string
 }

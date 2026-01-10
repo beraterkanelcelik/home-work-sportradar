@@ -176,3 +176,18 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+# Media files (for document uploads)
+MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+
+# RAG Configuration
+RAG_EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+RAG_EMBEDDING_DIMENSIONS = int(os.getenv('RAG_EMBEDDING_DIMENSIONS', '1536'))
+RAG_CHUNK_SIZE = int(os.getenv('RAG_CHUNK_SIZE', '1000'))  # tokens (approximate)
+RAG_CHUNK_OVERLAP = int(os.getenv('RAG_CHUNK_OVERLAP', '150'))  # tokens (approximate)
+RAG_RERANKER_MODEL = os.getenv('RERANKER_MODEL', 'cohere-rerank-english-v3.0')
+RAG_MAX_FILE_SIZE_MB = int(os.getenv('RAG_MAX_FILE_SIZE_MB', '50'))
+RAG_TOP_K = int(os.getenv('RAG_TOP_K', '30'))  # Initial retrieval count
+RAG_TOP_N = int(os.getenv('RAG_TOP_N', '8'))  # Final chunks after reranking
+RAG_MAX_CONTEXT_TOKENS = int(os.getenv('RAG_MAX_CONTEXT_TOKENS', '4000'))  # Max tokens in context

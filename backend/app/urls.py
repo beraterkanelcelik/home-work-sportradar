@@ -3,7 +3,9 @@ URL configuration for app project.
 """
 from django.contrib import admin
 from django.urls import path
-from app.api import health, chats, documents, agent
+from django.conf import settings
+from django.conf.urls.static import static
+from app.api import health, chats, documents, agent, rag, models
 from app.account.api import auth, users
 
 urlpatterns = [
@@ -35,8 +37,21 @@ urlpatterns = [
     # Documents
     path('api/documents/', documents.documents, name='documents'),
     path('api/documents/<int:document_id>/', documents.document_detail, name='document_detail'),
+    path('api/documents/<int:document_id>/file/', documents.document_file, name='document_file'),
+    path('api/documents/<int:document_id>/chunks/', documents.document_chunks, name='document_chunks'),
+    path('api/documents/<int:document_id>/index/', documents.document_index, name='document_index'),
     
     # Agent
     path('api/agent/run/', agent.run_agent, name='run_agent'),
     path('api/agent/stream/', agent.stream_agent, name='stream_agent'),
+    
+    # RAG
+    path('api/rag/query/', rag.rag_query, name='rag_query'),
+    
+    # Models
+    path('api/models/', models.get_available_models, name='available_models'),
 ]
+
+# Serve media files in development
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -15,8 +15,23 @@ interface UserProfile {
 
 interface TokenStats {
   total_tokens: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
   tokens_this_month: number
+  input_tokens_this_month: number
+  output_tokens_this_month: number
   tokens_last_30_days: number
+  input_tokens_last_30_days: number
+  output_tokens_last_30_days: number
+  total_cost: number
+  cost_this_month: number
+  cost_last_30_days: number
+  agent_usage: Record<string, number>
+  tool_usage: Record<string, number>
+  total_sessions: number
+  sessions_this_month: number
+  sessions_last_30_days: number
   account_created: string
 }
 
@@ -137,20 +152,30 @@ export default function ProfilePage() {
       {stats && (
         <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
           <h2 className="text-xl font-semibold mb-4">Token Usage</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
               <label className="text-sm font-medium text-muted-foreground block mb-1">Total Tokens</label>
               <p className="text-2xl font-bold">{stats.total_tokens.toLocaleString()}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">This Month</label>
-              <p className="text-2xl font-bold">{stats.tokens_this_month.toLocaleString()}</p>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Input Tokens</label>
+              <p className="text-2xl font-bold">{stats.input_tokens.toLocaleString()}</p>
             </div>
             <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Last 30 Days</label>
-              <p className="text-2xl font-bold">{stats.tokens_last_30_days.toLocaleString()}</p>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Output Tokens</label>
+              <p className="text-2xl font-bold">{stats.output_tokens.toLocaleString()}</p>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Cached Tokens</label>
+              <p className="text-2xl font-bold">{stats.cached_tokens.toLocaleString()}</p>
             </div>
           </div>
+          {stats.total_cost > 0 && (
+            <div className="mt-6 pt-6 border-t">
+              <label className="text-sm font-medium text-muted-foreground block mb-1">Total Cost</label>
+              <p className="text-3xl font-bold">${stats.total_cost.toFixed(4)}</p>
+            </div>
+          )}
         </div>
       )}
 

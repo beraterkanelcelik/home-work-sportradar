@@ -658,6 +658,182 @@ def get_session_metrics_from_langfuse(session_id: int) -> Optional[Dict[str, Any
         return None
 
 
+def get_user_metrics_from_langfuse(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Query Langfuse Metrics API for user-wide statistics across all sessions.
+    
+    Aggregates metrics from all sessions belonging to the user:
+    - Token usage (input, output, total, cached)
+    - Costs (input, output, total)
+    - Agent/tool usage statistics
+    - Time-based breakdowns (this month, last 30 days, all time)
+    
+    Args:
+        user_id: User ID
+        
+    Returns:
+        Dictionary with user-wide metrics or None if unavailable
+    """
+    if not LANGFUSE_ENABLED:
+        logger.warning("Langfuse is disabled, cannot get user metrics")
+        return None
+    
+    try:
+        langfuse = get_client()
+        if not langfuse:
+            logger.warning("Langfuse client unavailable")
+            return None
+        
+        # Get all user sessions from database
+        from app.db.models.session import ChatSession
+        from datetime import datetime, timedelta
+        
+        user_sessions = ChatSession.objects.filter(user_id=user_id).order_by('created_at')
+        session_count = user_sessions.count()
+        logger.info(f"Found {session_count} sessions for user {user_id}")
+        
+        if not user_sessions.exists():
+            logger.debug(f"No sessions found for user {user_id}")
+            return _get_empty_user_metrics()
+        
+        # Get time ranges
+        now = datetime.now(timezone.utc)
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        thirty_days_ago = now - timedelta(days=30)
+        first_session = user_sessions.first()
+        account_created = first_session.created_at if first_session else now
+        
+        # Query observations for all user sessions
+        all_observations = []
+        sessions_this_month = []
+        sessions_last_30_days = []
+        
+        for session in user_sessions:
+            try:
+                observations = query_session_observations(langfuse, session.id, session.created_at)
+                all_observations.extend(observations)
+                
+                # Track sessions by time period
+                if session.created_at >= start_of_month:
+                    sessions_this_month.append(session.id)
+                if session.created_at >= thirty_days_ago:
+                    sessions_last_30_days.append(session.id)
+            except Exception as e:
+                logger.warning(f"Failed to get observations for session {session.id}: {e}")
+                continue
+        
+        logger.info(f"Retrieved {len(all_observations)} observations from {session_count} sessions for user {user_id}")
+        
+        if len(all_observations) == 0:
+            logger.warning(f"No observations found in Langfuse for user {user_id} with {session_count} sessions. Sessions may not have traces yet.")
+            # Return empty metrics but include session counts
+            empty_metrics = _get_empty_user_metrics()
+            empty_metrics['total_sessions'] = session_count
+            empty_metrics['sessions_this_month'] = len(sessions_this_month)
+            empty_metrics['sessions_last_30_days'] = len(sessions_last_30_days)
+            empty_metrics['account_created'] = account_created.isoformat() if account_created else None
+            return empty_metrics
+        
+        # Aggregate metrics from all observations
+        all_time_metrics = _aggregate_metrics_from_observations(all_observations)
+        logger.info(f"Aggregated all-time metrics: total_tokens={all_time_metrics.get('total_tokens', 0)}")
+        
+        # Try to get time-period specific metrics using Metrics API
+        # For now, we'll aggregate from observations filtered by time
+        # (Metrics API doesn't easily support user_id filtering)
+        this_month_observations = []
+        last_30_days_observations = []
+        
+        for obs in all_observations:
+            obs_time = obs.get('start_time') or obs.get('startTime') or obs.get('createdAt')
+            if obs_time:
+                try:
+                    if isinstance(obs_time, str):
+                        obs_dt = datetime.fromisoformat(obs_time.replace('Z', '+00:00'))
+                    else:
+                        obs_dt = obs_time
+                    
+                    if obs_dt >= start_of_month:
+                        this_month_observations.append(obs)
+                    if obs_dt >= thirty_days_ago:
+                        last_30_days_observations.append(obs)
+                except Exception as e:
+                    logger.debug(f"Failed to parse observation time: {e}")
+                    continue
+        
+        this_month_metrics = _aggregate_metrics_from_observations(this_month_observations)
+        last_30_days_metrics = _aggregate_metrics_from_observations(last_30_days_observations)
+        
+        # Aggregate agent/tool usage from all observations
+        usage_stats = aggregate_agent_tool_usage(all_observations)
+        
+        return {
+            # All-time metrics
+            'total_tokens': all_time_metrics.get('total_tokens', 0),
+            'input_tokens': all_time_metrics.get('input_tokens', 0),
+            'output_tokens': all_time_metrics.get('output_tokens', 0),
+            'cached_tokens': all_time_metrics.get('cached_tokens', 0),
+            'total_cost': all_time_metrics.get('cost', {}).get('total', 0.0),
+            'input_cost': all_time_metrics.get('cost', {}).get('input', 0.0),
+            'output_cost': all_time_metrics.get('cost', {}).get('output', 0.0),
+            'cached_cost': all_time_metrics.get('cost', {}).get('cached', 0.0),
+            
+            # This month
+            'tokens_this_month': this_month_metrics.get('total_tokens', 0),
+            'input_tokens_this_month': this_month_metrics.get('input_tokens', 0),
+            'output_tokens_this_month': this_month_metrics.get('output_tokens', 0),
+            'cost_this_month': this_month_metrics.get('cost', {}).get('total', 0.0),
+            
+            # Last 30 days
+            'tokens_last_30_days': last_30_days_metrics.get('total_tokens', 0),
+            'input_tokens_last_30_days': last_30_days_metrics.get('input_tokens', 0),
+            'output_tokens_last_30_days': last_30_days_metrics.get('output_tokens', 0),
+            'cost_last_30_days': last_30_days_metrics.get('cost', {}).get('total', 0.0),
+            
+            # Usage statistics
+            'agent_usage': usage_stats.get('agent_usage', {}),
+            'tool_usage': usage_stats.get('tool_usage', {}),
+            
+            # Metadata
+            'total_sessions': user_sessions.count(),
+            'sessions_this_month': len(sessions_this_month),
+            'sessions_last_30_days': len(sessions_last_30_days),
+            'account_created': account_created.isoformat() if account_created else None,
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get Langfuse metrics for user {user_id}: {e}", exc_info=True)
+        return None
+
+
+def _get_empty_user_metrics() -> Dict[str, Any]:
+    """Return empty user metrics structure."""
+    return {
+        'total_tokens': 0,
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cached_tokens': 0,
+        'total_cost': 0.0,
+        'input_cost': 0.0,
+        'output_cost': 0.0,
+        'cached_cost': 0.0,
+        'tokens_this_month': 0,
+        'input_tokens_this_month': 0,
+        'output_tokens_this_month': 0,
+        'cost_this_month': 0.0,
+        'tokens_last_30_days': 0,
+        'input_tokens_last_30_days': 0,
+        'output_tokens_last_30_days': 0,
+        'cost_last_30_days': 0.0,
+        'agent_usage': {},
+        'tool_usage': {},
+        'total_sessions': 0,
+        'sessions_this_month': 0,
+        'sessions_last_30_days': 0,
+        'account_created': None,
+    }
+
+
 # ============================================================================
 # Timeline Formatting
 # ============================================================================
