@@ -74,6 +74,10 @@ Agent Playground provides all of this out of the box, with a beautiful UI, compr
 - **Langfuse v3**: AI observability and tracing (OpenTelemetry-based)
 - **PostgreSQL + pgvector**: Vector database for RAG
 - **Django REST Framework**: RESTful API with JWT authentication
+- **PDF Processing**: pdfplumber, PyMuPDF, pypdf for document extraction
+- **OCR**: pytesseract + pdf2image for scanned PDF support
+- **Token Counting**: tiktoken for accurate token estimation
+- **NLP**: spaCy (optional) for semantic chunking
 
 ### Frontend
 - **React 18**: Modern UI library
@@ -280,6 +284,14 @@ agents/
 
 #### RAG System (`app/rag/`)
 - **Document Processing**: Upload, chunking, and embedding
+  - **Enhanced PDF Extraction**: Multiple backends (pdfplumber, PyMuPDF, pypdf) with automatic fallback
+  - **OCR Support**: Automatic detection and OCR processing for scanned PDFs
+  - **Table Extraction**: Preserves tables from PDFs when using pdfplumber
+  - **Layout-Aware**: Better text extraction with structure preservation
+- **Advanced Chunking**: 
+  - **Semantic Chunking**: Preserves sentence and paragraph boundaries
+  - **Accurate Token Counting**: Uses tiktoken for precise token estimation
+  - **Configurable Strategies**: Choose between recursive or semantic chunking
 - **Vector Store**: pgvector for semantic search
 - **Retriever**: User-scoped context retrieval
 - **Multi-tenant**: Complete user isolation
@@ -442,16 +454,26 @@ make shell-db
 ### RAG (Retrieval-Augmented Generation)
 
 **Document Processing**:
-- Upload documents via API or UI
-- Automatic chunking and embedding
-- Vector storage in PostgreSQL with pgvector
+- Upload documents via API or UI (PDF, Markdown, Plain Text)
+- **Enhanced PDF Extraction**:
+  - Multiple extraction backends: pdfplumber (layout-aware, table support), PyMuPDF (fast), pypdf (fallback)
+  - Automatic fallback chain for reliability
+  - OCR support for scanned/image-based PDFs (via Tesseract)
+  - Table extraction and preservation
+- **Advanced Chunking**:
+  - **Semantic Chunking**: Preserves sentence and paragraph boundaries, avoids mid-sentence splits
+  - **Accurate Token Counting**: Uses tiktoken for precise token estimation (replaces rough character estimation)
+  - **Configurable Strategies**: Choose between recursive or semantic chunking via settings
+  - **PDF-Optimized**: Handles page breaks, paragraphs, and document structure
+- Automatic embedding and vector storage in PostgreSQL with pgvector
 
 **Retrieval**:
 - Semantic search with similarity scoring
 - User-scoped queries (multi-tenant isolation)
 - Configurable result limits and thresholds
+- Reranking support for improved relevance
 
-**Status**: Core infrastructure is in place. Tool integration for agents is planned.
+**Status**: Core infrastructure is in place. RAG tool integration for agents is implemented and working.
 
 ### Cost & Token Tracking
 
@@ -571,6 +593,18 @@ See `.env.example` for all configuration options:
 - `SECRET_KEY`: Django secret key (auto-generated if not set)
 - `DEBUG`: Debug mode (default: `True` for development)
 
+**PDF Extraction (RAG)**:
+- `PDF_EXTRACTOR_PREFERENCE`: Preferred PDF extractor (`pdfplumber`, `pymupdf`, or `pypdf`). Default: `pdfplumber`
+- `PDF_OCR_ENABLED`: Enable OCR for scanned PDFs (default: `True`)
+- `PDF_OCR_MIN_TEXT_THRESHOLD`: Minimum characters per page to skip OCR (default: `50`)
+
+**Chunking (RAG)**:
+- `RAG_CHUNKING_STRATEGY`: Chunking strategy (`recursive` or `semantic`). Default: `recursive`
+- `RAG_TOKEN_COUNTING_METHOD`: Token counting method (`tiktoken` or `estimation`). Default: `tiktoken`
+- `RAG_TOKENIZER_MODEL`: Model name for tiktoken encoding (default: `gpt-4o-mini`)
+- `RAG_CHUNK_SIZE`: Target chunk size in tokens (default: `1000`)
+- `RAG_CHUNK_OVERLAP`: Overlap between chunks in tokens (default: `150`)
+
 ### Model Configuration
 
 Edit `backend/app/core/pricing.py` to configure model pricing:
@@ -627,7 +661,11 @@ Agent Playground is designed to be a comprehensive platform for AI agent develop
 - Multi-agent system with supervisor pattern
 - Full observability with Langfuse
 - Token and cost tracking
-- RAG infrastructure
+- RAG infrastructure with enhanced PDF extraction
+  - Multiple PDF extraction backends with automatic fallback
+  - OCR support for scanned PDFs
+  - Semantic chunking with sentence boundary preservation
+  - Accurate token counting with tiktoken
 - Multi-tenant architecture
 - Production-ready API and frontend
 
@@ -644,9 +682,10 @@ Agent Playground is designed to be a comprehensive platform for AI agent develop
 - **Agent Marketplace**: Share and discover agents
 - **Workflow Builder**: Visual agent workflow designer
 - **Multi-model Support**: Support for Anthropic, Google, and other providers
-- **Advanced RAG**: Hybrid search, re-ranking, and query optimization
+- **Advanced RAG**: Hybrid search, enhanced re-ranking, and query optimization
 - **Agent Fine-tuning**: Custom model fine-tuning capabilities
 - **Collaboration Features**: Team workspaces and sharing
+- **Additional Document Formats**: Support for Word, Excel, PowerPoint, and more
 
 ---
 
