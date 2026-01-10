@@ -8,7 +8,12 @@ from app.db.models.document import Document, DocumentText
 from app.db.models.chunk import DocumentChunk
 from app.documents.services.extractor import extract_text
 from app.documents.services.storage import storage_service
-from app.rag.chunking import RecursiveCharacterTextSplitter, ChunkingConfig
+from app.rag.chunking import (
+    RecursiveCharacterTextSplitter, 
+    SemanticTextSplitter,
+    ChunkingConfig,
+    count_tokens
+)
 from app.rag.embeddings import OpenAIEmbeddingsClient, MockEmbeddingsClient
 from app.rag.vectorstore import PgVectorStore
 from app.observability.tracing import get_langfuse_client
@@ -89,11 +94,20 @@ def index_document(document_id: int, user_id: int) -> None:
         # Step 2: Chunk text
         with langfuse_trace("chunk_text", {'document_id': document_id}):
             chunking_config = ChunkingConfig()
-            splitter = RecursiveCharacterTextSplitter(config=chunking_config)
+            
+            # Select chunking strategy based on settings
+            chunking_strategy = getattr(settings, 'RAG_CHUNKING_STRATEGY', 'recursive')
+            if chunking_strategy == 'semantic':
+                splitter = SemanticTextSplitter(config=chunking_config)
+            else:
+                splitter = RecursiveCharacterTextSplitter(config=chunking_config)
             
             # Get page info for metadata
             extracted_text = DocumentText.objects.get(document=document)
-            chunks = splitter.split(text, metadata={'document_id': document_id})
+            chunks = splitter.split(text, metadata={
+                'document_id': document_id,
+                'extraction_method': metadata.get('extraction_method', 'unknown')
+            })
             
             # Add page numbers to chunk metadata
             for chunk in chunks:
@@ -140,8 +154,8 @@ def index_document(document_id: int, user_id: int) -> None:
         # Step 6: Update document status and counters
         document.status = Document.Status.READY
         document.chunks_count = len(chunk_objects)
-        # Rough token estimate: 1 token ≈ 4 characters
-        document.tokens_estimate = len(text) // 4
+        # Accurate token count using tiktoken if available
+        document.tokens_estimate = count_tokens(text, chunking_config.tokenizer_model)
         document.error_message = None
         document.save(update_fields=['status', 'chunks_count', 'tokens_estimate', 'error_message'])
         

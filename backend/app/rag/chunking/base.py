@@ -4,15 +4,18 @@ Base classes for chunking strategies.
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from django.conf import settings
+from .tokenizer import estimate_chunk_size_in_chars, count_tokens
 
 
 @dataclass
 class ChunkingConfig:
     """Configuration for text chunking."""
-    chunk_size: int = None  # Approximate tokens (will use chars * 0.25 as rough estimate)
+    chunk_size: int = None  # Target tokens
     overlap: int = None  # Overlap in tokens
     separators: List[str] = None
     min_chunk_size: int = 50  # Minimum chunk size in characters
+    tokenizer_model: str = None  # Model name for tokenizer
+    use_tiktoken: bool = True  # Use tiktoken for accurate counting
     
     def __post_init__(self):
         """Set defaults from settings if not provided."""
@@ -22,11 +25,23 @@ class ChunkingConfig:
             self.overlap = getattr(settings, 'RAG_CHUNK_OVERLAP', 150)
         if self.separators is None:
             # Default separators: paragraphs, sentences, words
-            self.separators = ['\n\n', '\n', '. ', ' ', '']
+            # PDF-specific: page breaks, paragraphs, lines
+            self.separators = ['\n\n\n', '\n\n', '\n', '. ', ' ', '']
+        if self.tokenizer_model is None:
+            self.tokenizer_model = getattr(settings, 'RAG_TOKENIZER_MODEL', 'gpt-4o-mini')
         
-        # Convert token estimates to character estimates (rough: 1 token ≈ 4 chars)
-        self.chunk_size_chars = self.chunk_size * 4
-        self.overlap_chars = self.overlap * 4
+        # Determine token counting method
+        token_method = getattr(settings, 'RAG_TOKEN_COUNTING_METHOD', 'tiktoken')
+        self.use_tiktoken = token_method == 'tiktoken' and self.use_tiktoken
+        
+        # Convert token estimates to character estimates
+        if self.use_tiktoken:
+            self.chunk_size_chars = estimate_chunk_size_in_chars(self.chunk_size, self.tokenizer_model)
+            self.overlap_chars = estimate_chunk_size_in_chars(self.overlap, self.tokenizer_model)
+        else:
+            # Fallback: rough estimation (1 token ≈ 4 chars)
+            self.chunk_size_chars = self.chunk_size * 4
+            self.overlap_chars = self.overlap * 4
 
 
 @dataclass

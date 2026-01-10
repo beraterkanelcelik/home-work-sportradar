@@ -191,3 +191,13 @@ RAG_MAX_FILE_SIZE_MB = int(os.getenv('RAG_MAX_FILE_SIZE_MB', '50'))
 RAG_TOP_K = int(os.getenv('RAG_TOP_K', '30'))  # Initial retrieval count
 RAG_TOP_N = int(os.getenv('RAG_TOP_N', '8'))  # Final chunks after reranking
 RAG_MAX_CONTEXT_TOKENS = int(os.getenv('RAG_MAX_CONTEXT_TOKENS', '4000'))  # Max tokens in context
+
+# PDF Extraction Configuration
+PDF_EXTRACTOR_PREFERENCE = os.getenv('PDF_EXTRACTOR_PREFERENCE', 'pdfplumber')  # pdfplumber, pymupdf, pypdf
+PDF_OCR_ENABLED = os.getenv('PDF_OCR_ENABLED', 'True').lower() == 'true'  # Enable OCR for scanned PDFs
+PDF_OCR_MIN_TEXT_THRESHOLD = int(os.getenv('PDF_OCR_MIN_TEXT_THRESHOLD', '50'))  # Min chars per page to skip OCR
+
+# Chunking Configuration
+RAG_CHUNKING_STRATEGY = os.getenv('RAG_CHUNKING_STRATEGY', 'recursive')  # recursive, semantic
+RAG_TOKEN_COUNTING_METHOD = os.getenv('RAG_TOKEN_COUNTING_METHOD', 'tiktoken')  # tiktoken, estimation
+RAG_TOKENIZER_MODEL = os.getenv('RAG_TOKENIZER_MODEL', 'gpt-4o-mini')  # Model for tiktoken encoding

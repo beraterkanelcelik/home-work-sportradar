@@ -348,6 +348,7 @@ def tool_node(state: AgentState) -> AgentState:
     # Since tools are created per-user, we need to get them from the agent
     tools = []
     user_id = state.get("user_id")
+    chat_session_id = state.get("chat_session_id")
     
     if current_agent == "greeter" and user_id:
         # Get greeter agent with tools

@@ -1,9 +1,11 @@
 """
 Recursive character text splitter implementation.
 Similar to LangChain's RecursiveCharacterTextSplitter.
+Enhanced with accurate token counting.
 """
 from typing import List, Dict, Any, Optional
 from .base import ChunkingStrategyBase, ChunkingConfig, Chunk
+from .tokenizer import count_tokens
 
 
 class RecursiveCharacterTextSplitter(ChunkingStrategyBase):
