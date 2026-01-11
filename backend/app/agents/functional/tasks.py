@@ -671,65 +671,6 @@ def check_summarization_needed_task(
 
 
 @task
-def save_status_message_task(
-    status_text: str,
-    task_name: str,
-    session_id: int,
-    is_completed: bool = False
-) -> bool:
-    """
-    Save a status message to the database as a system message.
-    
-    Args:
-        status_text: Status message text (will be converted to past tense if completed)
-        task_name: Name of the task
-        session_id: Chat session ID
-        is_completed: Whether the task is completed (convert to past tense)
-        
-    Returns:
-        True if successful
-    """
-    try:
-        from app.services.chat_service import add_message
-        
-        # Convert to past tense if completed
-        if is_completed:
-            # Simple past tense conversion for common patterns
-            past_tense_map = {
-                "Routing to agent...": "Routed to agent",
-                "Loading conversation history...": "Loaded conversation history",
-                "Processing with greeter agent...": "Processed with greeter agent",
-                "Searching documents...": "Searched documents",
-                "Executing tools...": "Executed tools",
-                "Processing tool results...": "Processed tool results",
-                "Checking if summarization needed...": "Checked if summarization needed",
-                "Saving message...": "Saved message",
-            }
-            content = past_tense_map.get(status_text, status_text.replace("ing...", "ed").replace("ing", "ed"))
-        else:
-            content = status_text
-        
-        # Save as system message
-        message = add_message(
-            session_id=session_id,
-            role="system",
-            content=content,
-            tokens_used=0,
-            metadata={
-                "task": task_name,
-                "status_type": "task_status",
-                "is_completed": is_completed
-            }
-        )
-        
-        logger.debug(f"Saved status message: {content} for task: {task_name}")
-        return True
-    except Exception as e:
-        logger.error(f"Error saving status message: {e}", exc_info=True)
-        return False
-
-
-@task
 def save_message_task(
     response: AgentResponse,
     session_id: int,
@@ -778,31 +719,6 @@ def save_message_task(
             "agent_name": response.agent_name or "greeter",  # For agent badge display
             "tool_calls": final_tool_calls,  # Tool calls with statuses
         }
-        
-        # Add response type and plan data if plan_proposal
-        if response.type == "plan_proposal":
-            metadata["response_type"] = "plan_proposal"
-            if response.plan:
-                metadata["plan"] = response.plan
-        
-        # Add clarification if present
-        if response.clarification:
-            metadata["clarification"] = response.clarification
-        
-        # Add raw tool outputs if present
-        if response.raw_tool_outputs:
-            metadata["raw_tool_outputs"] = response.raw_tool_outputs
-        
-        # Add token usage to metadata
-        if response.token_usage:
-            metadata.update({
-                "input_tokens": response.token_usage.get("input_tokens", 0),
-                "output_tokens": response.token_usage.get("output_tokens", 0),
-                "cached_tokens": response.token_usage.get("cached_tokens", 0),
-                "model": OPENAI_MODEL,
-            })
-        
-        logger.debug(f"Saving message with metadata: agent_name={metadata.get('agent_name')}, tool_calls={len(final_tool_calls)}, response_type={metadata.get('response_type')}, has_plan={bool(metadata.get('plan'))}, has_clarification={bool(metadata.get('clarification'))}")
         
         # Add response type and plan data if plan_proposal
         if response.type == "plan_proposal":

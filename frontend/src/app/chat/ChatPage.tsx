@@ -228,7 +228,6 @@ export default function ChatPage() {
         }))
 
         // Use streaming
-        console.log('[Stream] Starting stream for session:', currentSession.id)
         const stream = createAgentStream(
           currentSession.id,
           content,
@@ -267,17 +266,6 @@ export default function ChatPage() {
               // Handle workflow state updates (agent_name, tool_calls, plan_proposal, status, etc.)
               const updateData = event.data || {}
               
-              // Log status updates (but not every small update)
-              if (updateData.status) {
-                if (updateData.tool) {
-                  console.log(`[Status] Tool: ${updateData.tool} - ${updateData.status}`)
-                } else if (updateData.task) {
-                  console.log(`[Status] Task: ${updateData.task} - ${updateData.status}`)
-                } else {
-                  console.log(`[Status] ${updateData.status}`)
-                }
-              }
-              
               // Handle task status updates - create/update system status messages in real-time
               if (updateData.task && updateData.status) {
                 set((state: { messages: Message[] }) => {
@@ -310,7 +298,6 @@ export default function ChatPage() {
                     // Create new status message with unique temporary ID
                     // Use negative ID to avoid conflicts with database IDs
                     const tempId = -(Date.now() + Math.random() * 1000)
-                    console.log(`[Status Update] Creating new status for task ${updateData.task}: "${updateData.status}" (completed: ${updateData.is_completed})`)
                     const newStatusMessage: Message = {
                       id: tempId, // Temporary negative ID for real-time display
                       role: 'system',
@@ -355,7 +342,6 @@ export default function ChatPage() {
                 if (updateData.tool_calls) {
                   // Direct tool_calls array update - this comes after stream completes
                   // This is when we show the tool items
-                  console.log('[Tool Calls] Received tool_calls update:', updateData.tool_calls)
                   updatedMetadata.tool_calls = updateData.tool_calls
                 } else if (updateData.tool && updateData.status) {
                   // During streaming, track tool status updates (Executing -> Executed)
@@ -1557,17 +1543,12 @@ export default function ChatPage() {
                             )}
                             {/* Tool calls - collapsible boxes (displayed at end of message, only after stream completes) */}
                             {/* Tool status updates (Executing -> Executed) show during streaming, but tool items only after stream ends */}
-                            {(() => {
-                              const hasToolCalls = msg.role === 'assistant' && 
-                                msg.metadata?.tool_calls && 
-                                Array.isArray(msg.metadata.tool_calls) && 
-                                msg.metadata.tool_calls.length > 0
-                              const isStreamComplete = streamComplete.has(msg.id)
-                              if (hasToolCalls && !isStreamComplete) {
-                                console.log('[Tool Items] Has tool_calls but stream not complete yet. Message ID:', msg.id, 'Tool calls:', msg.metadata.tool_calls)
-                              }
-                              return hasToolCalls && isStreamComplete
-                            })() && (
+                            {/* For DB messages (positive IDs): always show if they have tool_calls. For temporary messages (negative IDs): only show after streamComplete */}
+                            {msg.role === 'assistant' && 
+                             msg.metadata?.tool_calls && 
+                             Array.isArray(msg.metadata.tool_calls) && 
+                             msg.metadata.tool_calls.length > 0 && 
+                             (msg.id > 0 || streamComplete.has(msg.id)) && (
                               <div className="mt-3 px-1 space-y-2">
                                 {msg.metadata.tool_calls.map((toolCall: any, idx: number) => {
                                   const toolCallId = `tool-${msg.id}-${idx}`

@@ -16,7 +16,6 @@ from app.agents.functional.tasks import (
     tool_execution_task,
     agent_with_tool_results_task,
     save_message_task,
-    save_status_message_task,
 )
 from app.agents.checkpoint import get_checkpoint_config
 from app.core.logging import get_logger

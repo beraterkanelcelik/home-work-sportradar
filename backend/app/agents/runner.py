@@ -284,7 +284,7 @@ def stream_agent_events(
                                     self.supervisor_in_stack = False  # Track if supervisor is in chain stack
                                     # Known agent names that supervisor might output
                                     self.agent_names = {"greeter", "search", "gmail", "config", "process"}
-                                    self.session_id = session_id  # For saving status messages
+                                    self.session_id = session_id  # Not used for status messages (they're ephemeral)
                                     self.active_tasks = {}  # Track active tasks: {task_name: status_text}
                                 
                                 def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs) -> None:
@@ -403,8 +403,6 @@ def stream_agent_events(
                                         tags = kwargs.get("tags", [])
                                         metadata = kwargs.get("metadata", {})
                                         
-                                        # TEMPORARY: Log chain start details to debug status updates
-                                        logger.info(f"Chain start - chain_name: '{chain_name}', name_from_kwargs: '{name_from_kwargs}', run_name: '{run_name}', tags: {tags}")
                                         
                                         # Extract function name from serialized if available
                                         # LangGraph Functional API may store function names in the chain data
@@ -512,36 +510,13 @@ def stream_agent_events(
                                                 # Send as regular update (for real-time display only - no DB persistence)
                                                 self.event_queue.put({"type": "update", "data": {"status": status, "task": task_name}})
                                             else:
-                                                logger.info(f"Sending generic status update for task: {task_name}")
+                                                # Generic status update for unmatched tasks
                                                 status_text = f"Running {task_name}..."
-                                                if self.session_id and task_name not in self.active_tasks:
-                                                    from app.services.chat_service import add_message
-                                                    try:
-                                                        status_msg = add_message(
-                                                            session_id=self.session_id,
-                                                            role="system",
-                                                            content=status_text,
-                                                            tokens_used=0,
-                                                            metadata={
-                                                                "task": task_name,
-                                                                "status_type": "task_status",
-                                                                "is_completed": False
-                                                            }
-                                                        )
-                                                        self.active_tasks[task_name] = {
-                                                            "status": status_text,
-                                                            "message_id": status_msg.id
-                                                        }
-                                                    except Exception as e:
-                                                        logger.debug(f"Failed to save status message: {e}")
-                                                        self.active_tasks[task_name] = {"status": status_text, "message_id": None}
-                                                elif task_name not in self.active_tasks:
-                                                    self.active_tasks[task_name] = {"status": status_text, "message_id": None}
+                                                # Track this task as active (no DB persistence - status messages are ephemeral UI feedback)
+                                                if task_name not in self.active_tasks:
+                                                    self.active_tasks[task_name] = {"status": status_text}
+                                                # Send as regular update (for real-time display only - no DB persistence)
                                                 self.event_queue.put({"type": "update", "data": {"status": status_text, "task": task_name}})
-                                        else:
-                                            # Log unmatched chains for debugging - TEMPORARY to diagnose issue
-                                            if effective_name and effective_name not in ["RunnableSequence", "RunnableParallel", ""]:
-                                                logger.info(f"Unmatched chain: '{effective_name}' (chain_name: '{chain_name}', run_name: '{run_name}', function_name: '{function_name}', tags: {tags})")
                                     
                                     except Exception as e:
                                         logger.error(f"Error in StreamingCallbackHandler.on_chain_start callback: {e}", exc_info=True)
@@ -710,8 +685,6 @@ def stream_agent_events(
                             tool_calls = None
                             
                             if final_state and isinstance(final_state, dict):
-                                logger.info(f"Final state keys: {list(final_state.keys())}")
-                                
                                 # Try different ways to extract the response
                                 # The state might contain the response directly or under a key
                                 response_data = None
@@ -768,10 +741,9 @@ def stream_agent_events(
                                             formatted_tc["error"] = tc.get("error")
                                         formatted_tool_calls.append(formatted_tc)
                                     update_data["tool_calls"] = formatted_tool_calls
-                                    logger.info(f"Formatted {len(formatted_tool_calls)} tool_calls for frontend")
                                 
                                 if update_data:
-                                    logger.info(f"Sending final update event with tool_calls: {len(update_data.get('tool_calls', []))} tools, agent_name: {update_data.get('agent_name')}")
+                                    logger.info(f"Sending final update event: {len(update_data.get('tool_calls', []))} tool_calls, agent: {update_data.get('agent_name')}")
                                     event_queue.put({
                                         "type": "update",
                                         "data": update_data
