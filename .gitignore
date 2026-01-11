@@ -37,7 +37,7 @@ venv.bak/
 *.swp
 *.swo
 *~
-.cursorrules
+/.cursor/
 
 # OS
 .DS_Store
