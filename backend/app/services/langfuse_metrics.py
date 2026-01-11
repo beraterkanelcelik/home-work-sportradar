@@ -114,7 +114,8 @@ def _convert_observation_to_dict(obs: Any, trace_id: str) -> Optional[Dict[str, 
                 'id', 'type', 'name', 'start_time', 'startTime', 'createdAt',
                 'end_time', 'endTime', 'latency', 'metadata', 'usage', 'usage_details',
                 'input', 'output', 'trace_id', 'traceId', 'calculated_total_cost',
-                'calculated_input_cost', 'calculated_output_cost', 'total_cost'
+                'calculated_input_cost', 'calculated_output_cost', 'total_cost',
+                'parent_observation_id', 'parentObservationId', 'parent_id', 'parentId'
             ]
             for attr in attrs:
                 if hasattr(obs, attr):
@@ -224,6 +225,12 @@ def _extract_observation_fields(obs: Union[Dict[str, Any], Any]) -> Dict[str, An
             'input': obs.get('input'),
             'output': obs.get('output'),
             'trace_id': obs.get('_trace_id') or obs.get('trace_id') or obs.get('traceId'),
+            'parent_observation_id': (
+                obs.get('parent_observation_id') or 
+                obs.get('parentObservationId') or 
+                obs.get('parent_id') or
+                obs.get('parentId')
+            ),
         }
     else:
         return {
@@ -248,6 +255,12 @@ def _extract_observation_fields(obs: Union[Dict[str, Any], Any]) -> Dict[str, An
                 getattr(obs, '_trace_id', None) or
                 getattr(obs, 'trace_id', None) or
                 getattr(obs, 'traceId', None)
+            ),
+            'parent_observation_id': (
+                getattr(obs, 'parent_observation_id', None) or
+                getattr(obs, 'parentObservationId', None) or
+                getattr(obs, 'parent_id', None) or
+                getattr(obs, 'parentId', None)
             ),
         }
 
@@ -867,6 +880,7 @@ def format_observations_timeline(observations: List[Dict[str, Any]]) -> List[Dic
                 else str(fields['start_time']) if fields['start_time'] else None
             ),
             'latency_ms': float(fields['latency']) * 1000 if fields['latency'] else None,
+            'parent_id': str(fields['parent_observation_id']) if fields['parent_observation_id'] else None,
         }
         
         # Extract usage and tokens
@@ -956,6 +970,62 @@ def format_observations_timeline(observations: List[Dict[str, Any]]) -> List[Dic
         
         timeline.append(activity)
     
-    # Sort by timestamp (oldest first)
+    # Build tree structure if parent_ids are available
+    # Group activities by parent_id to create hierarchy
+    activities_by_id = {act['id']: act for act in timeline if act['id']}
+    activities_by_parent = {}
+    root_activities = []
+    
+    for activity in timeline:
+        parent_id = activity.get('parent_id')
+        if parent_id and parent_id in activities_by_id:
+            # Has a valid parent
+            if parent_id not in activities_by_parent:
+                activities_by_parent[parent_id] = []
+            activities_by_parent[parent_id].append(activity)
+        else:
+            # Root activity (no parent or parent not found)
+            root_activities.append(activity)
+    
+    # If we have parent relationships, build tree structure
+    if activities_by_parent:
+        def build_tree(activity: Dict[str, Any], level: int = 0) -> Dict[str, Any]:
+            """Recursively build tree structure with indentation level."""
+            activity['level'] = level
+            activity['children'] = []
+            
+            activity_id = activity.get('id')
+            if activity_id and activity_id in activities_by_parent:
+                children = activities_by_parent[activity_id]
+                # Sort children by timestamp
+                children.sort(key=lambda x: x.get('timestamp') or '', reverse=False)
+                for child in children:
+                    child_with_tree = build_tree(child, level + 1)
+                    activity['children'].append(child_with_tree)
+            
+            return activity
+        
+        # Build tree starting from root activities
+        tree_timeline = []
+        root_activities.sort(key=lambda x: x.get('timestamp') or '', reverse=False)
+        for root in root_activities:
+            tree_timeline.append(build_tree(root, 0))
+        
+        # Flatten tree back to list for frontend (with level info)
+        def flatten_tree(activity: Dict[str, Any], result: List[Dict[str, Any]]):
+            """Flatten tree structure while preserving level information."""
+            # Add current activity
+            activity_copy = {k: v for k, v in activity.items() if k != 'children'}
+            result.append(activity_copy)
+            # Add children recursively
+            for child in activity.get('children', []):
+                flatten_tree(child, result)
+        
+        flattened = []
+        for root in tree_timeline:
+            flatten_tree(root, flattened)
+        return flattened
+    
+    # No parent relationships found, return flat list sorted by timestamp
     timeline.sort(key=lambda x: x.get('timestamp') or '', reverse=False)
     return timeline

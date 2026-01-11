@@ -16,6 +16,7 @@ from app.agents.functional.tasks import (
     tool_execution_task,
     agent_with_tool_results_task,
     save_message_task,
+    save_status_message_task,
 )
 from app.agents.checkpoint import get_checkpoint_config
 from app.core.logging import get_logger
@@ -250,6 +251,9 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
         
         logger.info(f"Supervisor routed to agent: {routing.agent}")
         
+        # Track executed tool_calls to preserve them in final response (for streaming)
+        executed_tool_calls_with_status = None
+        
         # Check for clarification request
         if routing.require_clarification:
             return AgentResponse(
@@ -291,21 +295,45 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
         if response.tool_calls:
             logger.info(f"Found {len(response.tool_calls)} tool calls")
             
+            # Initialize tool call statuses as 'pending' if not already set
+            for tc in response.tool_calls:
+                if 'status' not in tc:
+                    tc['status'] = 'pending'
+            
             # Create AIMessage with tool_calls from the response
             # This is required before adding ToolMessages (OpenAI API requirement)
             from langchain_core.messages import AIMessage
             
             # Build tool_calls with proper IDs
+            # IMPORTANT: Ensure each tool call has a unique ID, even if same tool is called multiple times
+            import uuid
             tool_calls_with_ids = []
+            seen_tool_call_signatures = {}  # Track (tool_name, args_hash) -> tool_call_id to reuse IDs for same calls
+            
             for tc in response.tool_calls:
                 tool_call_id = tc.get("id")
+                tool_name = tc.get("name") or tc.get("tool", "")
+                tool_args = tc.get("args", {})
+                
                 if not tool_call_id:
-                    # Generate ID if not present (fallback)
-                    tool_call_id = f"{tc.get('name') or tc.get('tool', '')}_{hash(str(tc.get('args', {})))}"
+                    # Create signature for this tool call
+                    args_str = str(sorted(tool_args.items())) if isinstance(tool_args, dict) else str(tool_args)
+                    signature = (tool_name, hash(args_str))
+                    
+                    # Check if we've seen this exact tool call before (same tool + same args)
+                    if signature in seen_tool_call_signatures:
+                        # Reuse the ID for the same tool call
+                        tool_call_id = seen_tool_call_signatures[signature]
+                    else:
+                        # Generate unique ID for this tool call
+                        tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
+                        seen_tool_call_signatures[signature] = tool_call_id
+                    
+                    tc['id'] = tool_call_id  # Store ID back in tool_call
                 
                 tool_calls_with_ids.append({
-                    "name": tc.get("name") or tc.get("tool", ""),
-                    "args": tc.get("args", {}),
+                    "name": tool_name,
+                    "args": tool_args,
                     "id": tool_call_id
                 })
             
@@ -344,27 +372,73 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
                     config=checkpoint_config
                 ).result()
                 
+                # Update tool_calls with execution status
+                # Mark executed tools as completed or error
+                for tc in response.tool_calls:
+                    tool_name = tc.get("name") or tc.get("tool", "")
+                    # Check if this tool was auto-executed
+                    if any(p.tool == tool_name for p in auto_executable):
+                        # Find matching tool result
+                        matching_result = next(
+                            (tr for tr in tool_results if tr.tool == tool_name),
+                            None
+                        )
+                        if matching_result:
+                            if matching_result.error:
+                                tc["status"] = "error"
+                                tc["error"] = matching_result.error
+                            else:
+                                tc["status"] = "completed"
+                                tc["output"] = matching_result.output
+                        else:
+                            # Tool was supposed to be executed but no result (error case)
+                            tc["status"] = "error"
+                            tc["error"] = "Tool execution failed - no result returned"
+                
                 # Add tool results as ToolMessages
                 # Match tool_call_id with the id from the AIMessage tool_calls
+                # IMPORTANT: Match by both tool name AND args to handle multiple calls of same tool
                 tool_messages = []
+                used_tool_call_ids = set()  # Track used IDs to prevent duplicates
+                
                 for tr in tool_results:
                     # Find matching tool_call_id from the AIMessage we just created
+                    # Match by tool name AND args to handle multiple calls of same tool
                     tool_call_id = None
                     for tc in ai_message_with_tool_calls.tool_calls:
-                        if tc.get("name") == tr.tool:
+                        tc_name = tc.get("name") or tc.get("tool", "")
+                        tc_args = tc.get("args", {})
+                        # Match by name and args (compare args as dict)
+                        if tc_name == tr.tool and tc_args == tr.args:
                             tool_call_id = tc.get("id")
-                            break
+                            # Ensure this ID hasn't been used yet
+                            if tool_call_id and tool_call_id not in used_tool_call_ids:
+                                break
+                            elif tool_call_id in used_tool_call_ids:
+                                # This ID was already used, continue searching
+                                tool_call_id = None
+                                continue
                     
                     if not tool_call_id:
                         # Fallback: try to get from response.tool_calls
                         for tc in response.tool_calls:
-                            if (tc.get("name") or tc.get("tool")) == tr.tool:
+                            tc_name = tc.get("name") or tc.get("tool", "")
+                            tc_args = tc.get("args", {})
+                            if tc_name == tr.tool and tc_args == tr.args:
                                 tool_call_id = tc.get("id")
-                                break
+                                if tool_call_id and tool_call_id not in used_tool_call_ids:
+                                    break
+                                elif tool_call_id in used_tool_call_ids:
+                                    tool_call_id = None
+                                    continue
                     
                     if not tool_call_id:
-                        # Final fallback to generated ID
-                        tool_call_id = f"{tr.tool}_{hash(str(tr.args))}"
+                        # Generate unique ID with index to ensure uniqueness
+                        import uuid
+                        tool_call_id = f"{tr.tool}_{uuid.uuid4().hex[:8]}"
+                    
+                    # Mark this ID as used
+                    used_tool_call_ids.add(tool_call_id)
                     
                     tool_msg = ToolMessage(
                         content=str(tr.output) if tr.output else tr.error,
@@ -376,8 +450,12 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
                 # Add tool messages to conversation
                 messages = messages + tool_messages
                 
+                # PRESERVE tool_calls with statuses before refine step
+                # The refined response might not include these, but we need to save them
+                executed_tool_calls_with_status = response.tool_calls.copy() if response.tool_calls else []
+                
                 # Re-invoke agent with tool results (refine)
-                response = agent_with_tool_results_task(
+                refined_response = agent_with_tool_results_task(
                     agent_name=routing.agent,
                     query=routing.query,
                     messages=messages,
@@ -386,6 +464,14 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
                     model_name=None,
                     config=checkpoint_config
                 ).result()
+                
+                # Preserve tool_calls from original response (with statuses) in refined response
+                # This ensures tool_calls with execution statuses are saved
+                if executed_tool_calls_with_status:
+                    refined_response.tool_calls = executed_tool_calls_with_status
+                
+                # Use refined response as the final response
+                response = refined_response
                 
                 # Check for more tool calls after refine
                 if response.tool_calls:
@@ -423,12 +509,28 @@ def ai_agent_workflow(request: AgentRequest) -> AgentResponse:
         
         # Save message to database if session_id provided
         # Save both regular answers and plan proposals
+        # IMPORTANT: Preserve tool_calls from initial response (before refine) if they were executed
+        # The refined response might not have tool_calls, but we want to save the executed ones
+        final_tool_calls = response.tool_calls
+        
+        # Ensure tool_calls are in the final response for streaming
+        # If we executed tools earlier, they should be preserved in the response
+        # But if they're missing (e.g., after refine), restore them from executed_tool_calls_with_status
+        if not response.tool_calls and executed_tool_calls_with_status:
+            response.tool_calls = executed_tool_calls_with_status
+            final_tool_calls = executed_tool_calls_with_status
+            logger.info(f"Restored {len(final_tool_calls)} tool_calls in final response for streaming")
+        
         if request.session_id and (response.reply or response.type == "plan_proposal"):
+            # If we had tool calls earlier and they were executed, preserve them
+            # Check if we're in a tool execution flow (response might be from refine step)
+            # In that case, tool_calls should already be in response from the initial agent call
+            # But if we executed tools, we need to preserve those tool_calls with their statuses
             save_message_task(
                 response=response,
                 session_id=request.session_id,
                 user_id=request.user_id,
-                tool_calls=response.tool_calls
+                tool_calls=final_tool_calls  # Pass tool_calls with updated statuses
             ).result()
         
         # Update trace with final response

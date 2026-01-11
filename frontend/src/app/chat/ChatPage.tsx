@@ -31,6 +31,7 @@ export default function ChatPage() {
   const [attachedFiles, setAttachedFiles] = useState<File[]>([])
   const [waitingForResponse, setWaitingForResponse] = useState(false)
   const [waitingMessageId, setWaitingMessageId] = useState<number | null>(null)
+  const [streamComplete, setStreamComplete] = useState<Set<number>>(new Set()) // Track which messages have completed streaming
   const [statsDialogOpen, setStatsDialogOpen] = useState(false)
   const [stats, setStats] = useState<any>(null)
   const [loadingStats, setLoadingStats] = useState(false)
@@ -117,8 +118,28 @@ export default function ChatPage() {
       initialMessageSentRef.current = false
     } else {
       clearCurrentSession()
+      // Clear stream complete flags when clearing session
+      setStreamComplete(new Set())
     }
   }, [sessionId, loadSession, loadMessages, clearCurrentSession, currentSession])
+  
+  // Mark all loaded messages from database as stream complete (they're already finished)
+  // Only run when session changes to avoid unnecessary updates
+  useEffect(() => {
+    if (currentSession && messages.length > 0) {
+      setStreamComplete(prev => {
+        const newSet = new Set(prev)
+        messages.forEach(msg => {
+          // Mark assistant messages from DB (positive IDs) as stream complete
+          // Temporary messages (negative IDs) are still streaming
+          if (msg.role === 'assistant' && msg.id > 0 && msg.id < 1000000000000) {
+            newSet.add(msg.id)
+          }
+        })
+        return newSet
+      })
+    }
+  }, [currentSession?.id]) // Only run when session changes
 
   // Sync selected model with session model
   useEffect(() => {
@@ -172,10 +193,26 @@ export default function ChatPage() {
       }
 
       if (useStreaming) {
+        // Clear any old temporary status messages before starting a new stream
+        // They are ephemeral and should not persist across different streams
+        set((state: { messages: Message[] }) => ({
+          messages: state.messages.filter(
+            (msg: Message) => !(msg.id < 0 && msg.role === 'system' && msg.metadata?.status_type === 'task_status')
+          )
+        }))
+        
         // Create streaming message placeholder
         const assistantMessageId = Date.now() + 1
         setWaitingForResponse(true)
         setWaitingMessageId(assistantMessageId)
+        // Reset stream complete flag for this new message
+        setStreamComplete(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(assistantMessageId) // Remove if it exists (shouldn't, but just in case)
+          return newSet
+        })
+        
+        
         set((state: { messages: Message[] }) => ({
           messages: [
             ...state.messages,
@@ -191,6 +228,7 @@ export default function ChatPage() {
         }))
 
         // Use streaming
+        console.log('[Stream] Starting stream for session:', currentSession.id)
         const stream = createAgentStream(
           currentSession.id,
           content,
@@ -200,36 +238,140 @@ export default function ChatPage() {
               // First token received, hide loading indicator
               setWaitingForResponse(false)
               setWaitingMessageId(null)
+              
               // Update the assistant message in store by appending the new token
+              // Keep status until we have substantial content
               set((state: { messages: Message[] }) => {
                 const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
-                const currentContent = currentMessage?.content || ''
+                if (!currentMessage) {
+                  return state // Message was removed, skip update
+                }
+                
+                const currentContent = currentMessage.content || ''
                 const newContent = currentContent + event.data
                 
                 return {
                   messages: state.messages.map((msg: Message) =>
                     msg.id === assistantMessageId
-                      ? { ...msg, content: newContent }
+                      ? { 
+                          ...msg, 
+                          content: newContent,
+                          // Clear status only when we have substantial content (more than 50 chars)
+                          status: newContent.length > 50 ? undefined : msg.status
+                        }
                       : msg
                   ),
                 }
               })
             } else if (event.type === 'update') {
-              // Handle workflow state updates (agent_name, tool_calls, plan_proposal, etc.)
+              // Handle workflow state updates (agent_name, tool_calls, plan_proposal, status, etc.)
+              const updateData = event.data || {}
+              
+              // Log status updates (but not every small update)
+              if (updateData.status) {
+                if (updateData.tool) {
+                  console.log(`[Status] Tool: ${updateData.tool} - ${updateData.status}`)
+                } else if (updateData.task) {
+                  console.log(`[Status] Task: ${updateData.task} - ${updateData.status}`)
+                } else {
+                  console.log(`[Status] ${updateData.status}`)
+                }
+              }
+              
+              // Handle task status updates - create/update system status messages in real-time
+              if (updateData.task && updateData.status) {
+                set((state: { messages: Message[] }) => {
+                  // Check if status message already exists for this task (check both temp and DB messages)
+                  const existingStatusMsg = state.messages.find(
+                    (msg: Message) => 
+                      msg.role === 'system' && 
+                      msg.metadata?.status_type === 'task_status' &&
+                      msg.metadata?.task === updateData.task
+                  )
+                  
+                  if (existingStatusMsg) {
+                    // Update existing status message (present -> past tense)
+                    console.log(`[Status Update] Updating task ${updateData.task}: "${existingStatusMsg.content}" -> "${updateData.status}" (completed: ${updateData.is_completed})`)
+                    return {
+                      messages: state.messages.map((msg: Message) =>
+                        msg.id === existingStatusMsg.id
+                          ? {
+                              ...msg,
+                              content: updateData.status,
+                              metadata: {
+                                ...msg.metadata,
+                                is_completed: updateData.is_completed === true
+                              }
+                            }
+                          : msg
+                      ),
+                    }
+                  } else {
+                    // Create new status message with unique temporary ID
+                    // Use negative ID to avoid conflicts with database IDs
+                    const tempId = -(Date.now() + Math.random() * 1000)
+                    console.log(`[Status Update] Creating new status for task ${updateData.task}: "${updateData.status}" (completed: ${updateData.is_completed})`)
+                    const newStatusMessage: Message = {
+                      id: tempId, // Temporary negative ID for real-time display
+                      role: 'system',
+                      content: updateData.status,
+                      tokens_used: 0,
+                      created_at: new Date().toISOString(),
+                      metadata: {
+                        task: updateData.task,
+                        status_type: 'task_status',
+                        is_completed: updateData.is_completed === true || false
+                      }
+                    }
+                    
+                    // Insert before the assistant message
+                    const assistantIndex = state.messages.findIndex((msg: Message) => msg.id === assistantMessageId)
+                    if (assistantIndex >= 0) {
+                      const newMessages = [...state.messages]
+                      newMessages.splice(assistantIndex, 0, newStatusMessage)
+                      return { messages: newMessages }
+                    } else {
+                      return { messages: [...state.messages, newStatusMessage] }
+                    }
+                  }
+                })
+              }
+              
               set((state: { messages: Message[] }) => {
                 const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
-                if (!currentMessage) return state
+                if (!currentMessage) {
+                  return state
+                }
                 
-                const updateData = event.data || {}
                 const updatedMetadata = {
                   ...currentMessage.metadata,
                   ...(updateData.agent_name && { agent_name: updateData.agent_name }),
-                  ...(updateData.tool_calls && { tool_calls: updateData.tool_calls }),
+                }
+                
+                // Handle tool status updates during streaming (Executing -> Executed)
+                // But tool items (collapsible boxes) will only show after stream completes
+                let updatedToolCalls = currentMessage.metadata?.tool_calls || []
+                
+                if (updateData.tool_calls) {
+                  // Direct tool_calls array update - this comes after stream completes
+                  // This is when we show the tool items
+                  console.log('[Tool Calls] Received tool_calls update:', updateData.tool_calls)
+                  updatedMetadata.tool_calls = updateData.tool_calls
+                } else if (updateData.tool && updateData.status) {
+                  // During streaming, track tool status updates (Executing -> Executed)
+                  // But don't create tool_calls array yet - tool items will only appear after stream completes
+                  // Status updates are fine, but tool items (collapsible boxes) should wait
                 }
                 
                 // Check if this is a plan_proposal response
                 const updates: Partial<Message> = {
                   metadata: updatedMetadata,
+                }
+                
+                // Update general status if provided (for task execution status, not tool-specific)
+                // Only set general status if it's not a tool-specific update
+                if (updateData.status && !updateData.tool) {
+                  updates.status = updateData.status
                 }
                 
                 if (updateData.type === 'plan_proposal' && updateData.plan) {
@@ -251,7 +393,15 @@ export default function ChatPage() {
               })
             } else if (event.type === 'done') {
               // Handle completion event with final data
+              // tool_calls are sent via update event (before done event), we just mark stream as complete
               const doneData = event.data || {}
+              
+              // Mark stream as complete for this message - tool items can now be shown
+              // tool_calls should already be set via update event, we just need to show them
+              if (assistantMessageId) {
+                setStreamComplete(prev => new Set(prev).add(assistantMessageId))
+              }
+              
               set((state: { messages: Message[] }) => {
                 return {
                   messages: state.messages.map((msg: Message) =>
@@ -265,7 +415,50 @@ export default function ChatPage() {
                   ),
                 }
               })
+              
+              // Mark all active temporary status messages as completed
+              // This ensures they show as past tense even if on_chain_end events haven't fired yet
+              set((state: { messages: Message[] }) => {
+                return {
+                  messages: state.messages.map((msg: Message) => {
+                    // Update any active temporary status messages to completed
+                    if (msg.id < 0 && 
+                        msg.role === 'system' && 
+                        msg.metadata?.status_type === 'task_status' &&
+                        msg.metadata?.is_completed === false) {
+                      // Convert to past tense
+                      const pastTenseMap: Record<string, string> = {
+                        "Processing with agent...": "Processed with agent",
+                        "Routing to agent...": "Routed to agent",
+                        "Loading conversation history...": "Loaded conversation history",
+                        "Processing with greeter agent...": "Processed with greeter agent",
+                        "Searching documents...": "Searched documents",
+                        "Executing tools...": "Executed tools",
+                        "Processing tool results...": "Processed tool results",
+                        "Checking if summarization needed...": "Checked if summarization needed",
+                        "Saving message...": "Saved message",
+                      }
+                      const pastContent = pastTenseMap[msg.content] || msg.content.replace(/ing\.\.\.$/, "ed").replace(/ing$/, "ed")
+                      return {
+                        ...msg,
+                        content: pastContent,
+                        metadata: {
+                          ...msg.metadata,
+                          is_completed: true
+                        }
+                      }
+                    }
+                    return msg
+                  })
+                }
+              })
             } else if (event.type === 'error') {
+              console.error('[ChatPage] Error event received:', {
+                error: event.data?.error,
+                fullData: event.data,
+                assistantMessageId
+              })
+              
               toast.error(event.data?.error || 'Streaming error occurred')
               setSending(false)
               setWaitingForResponse(false)
@@ -278,10 +471,12 @@ export default function ChatPage() {
             setWaitingForResponse(false)
             setWaitingMessageId(null)
           },
-          () => {
-            // Stream complete, reload messages to get final saved version
-            // This will also update any plan_proposal or other response types from backend
-            loadMessages(currentSession.id)
+          async () => {
+            // Stream complete - no reload needed!
+            // All data (content, tool_calls, agent_name, metadata) comes from the stream
+            // Status messages are ephemeral and already updated in real-time
+            // The assistant message is already complete with all metadata from update events
+            
             setSending(false)
             setWaitingForResponse(false)
             setWaitingMessageId(null)
@@ -1205,20 +1400,80 @@ export default function ChatPage() {
               ) : (
                 <div className="max-w-3xl mx-auto px-4 py-8">
                   <div className="space-y-6">
-                    {messages.map((msg: Message) => {
-                      const agentName = getAgentName(msg)
-                      // Show loading indicator for streaming mode when message exists but has no content yet
-                      const isWaiting = useStreaming && waitingForResponse && msg.id === waitingMessageId && !msg.content
-                      const isPlanProposal = msg.response_type === 'plan_proposal' && msg.plan
-                      const isExecutingPlan = executingPlanMessageId === msg.id
-                      const hasClarification = msg.clarification
-                      const hasRawToolOutputs = msg.raw_tool_outputs && msg.raw_tool_outputs.length > 0
+                    {(() => {
+                      // Deduplicate messages by ID before rendering
+                      const seenIds = new Set<number>()
+                      const uniqueMessages = messages.filter((msg: Message) => {
+                        if (seenIds.has(msg.id)) {
+                          return false
+                        }
+                        seenIds.add(msg.id)
+                        return true
+                      })
                       
-                      return (
-                        <div
-                          key={msg.id}
-                          className={`flex gap-3 items-start ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                        >
+                      return uniqueMessages.map((msg: Message) => {
+                        const agentName = getAgentName(msg)
+                        // Show loading indicator for streaming mode when message exists but has no content yet
+                        const isPlanProposal = msg.response_type === 'plan_proposal' && msg.plan
+                        const isExecutingPlan = executingPlanMessageId === msg.id
+                        const hasClarification = msg.clarification
+                        const hasRawToolOutputs = msg.raw_tool_outputs && msg.raw_tool_outputs.length > 0
+                        const isStatusMessage = msg.role === 'system' && msg.metadata?.status_type === 'task_status'
+                        
+                        // Render status messages as system messages with animation (like Cursor chat)
+                        if (isStatusMessage) {
+                          const isCompleted = msg.metadata?.is_completed === true
+                          // Check if previous message is also a status message to reduce gap
+                          const msgIndex = messages.indexOf(msg)
+                          const prevMsg = msgIndex > 0 ? messages[msgIndex - 1] : null
+                          const isPrevStatus = prevMsg?.role === 'system' && prevMsg?.metadata?.status_type === 'task_status'
+                          
+                          return (
+                            <div
+                              key={msg.id}
+                              className="flex gap-2 items-center justify-start"
+                              style={{ 
+                                lineHeight: '1',
+                                marginTop: isPrevStatus ? '-4px' : '0',
+                                marginBottom: '0',
+                                paddingTop: '0',
+                                paddingBottom: '0'
+                              }}
+                            >
+                              <div className="w-6 h-6 flex items-center justify-center flex-shrink-0" style={{ margin: '0', padding: '0' }}>
+                                {/* Animated dot for active status, static for completed */}
+                                {!isCompleted ? (
+                                  <span 
+                                    className="w-1.5 h-1.5 bg-primary rounded-full" 
+                                    style={{ 
+                                      animation: 'breathe 1.4s ease-in-out infinite',
+                                    }}
+                                  ></span>
+                                ) : (
+                                  <span className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full"></span>
+                                )}
+                              </div>
+                              <div className="flex flex-col max-w-[85%]" style={{ margin: '0', padding: '0' }}>
+                                <div 
+                                  className={`text-xs px-1 ${isCompleted ? 'text-muted-foreground italic' : 'text-foreground'}`} 
+                                  style={{ 
+                                    lineHeight: '1',
+                                    margin: '0',
+                                    padding: '0'
+                                  }}
+                                >
+                                  {msg.content}
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        }
+                        
+                        return (
+                          <div
+                            key={msg.id}
+                            className={`flex gap-3 items-start ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                          >
                           {msg.role === 'assistant' && (
                             <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
                               <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1239,31 +1494,7 @@ export default function ChatPage() {
                                   : 'bg-muted text-foreground'
                               }`}
                             >
-                              {isWaiting ? (
-                                <div className="flex items-center gap-1.5 py-1">
-                                  <span 
-                                    className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                    style={{ 
-                                      animation: 'breathe 1.4s ease-in-out infinite',
-                                      animationDelay: '0ms'
-                                    }}
-                                  ></span>
-                                  <span 
-                                    className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                    style={{ 
-                                      animation: 'breathe 1.4s ease-in-out infinite',
-                                      animationDelay: '200ms'
-                                    }}
-                                  ></span>
-                                  <span 
-                                    className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                    style={{ 
-                                      animation: 'breathe 1.4s ease-in-out infinite',
-                                      animationDelay: '400ms'
-                                    }}
-                                  ></span>
-                                </div>
-                              ) : msg.role === 'user' ? (
+                              {msg.role === 'user' ? (
                                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
                                   {msg.content}
                                 </p>
@@ -1324,8 +1555,19 @@ export default function ChatPage() {
                                 ))}
                               </div>
                             )}
-                            {/* Tool calls - collapsible boxes (displayed at end of message) */}
-                            {msg.role === 'assistant' && msg.metadata?.tool_calls && Array.isArray(msg.metadata.tool_calls) && msg.metadata.tool_calls.length > 0 && (
+                            {/* Tool calls - collapsible boxes (displayed at end of message, only after stream completes) */}
+                            {/* Tool status updates (Executing -> Executed) show during streaming, but tool items only after stream ends */}
+                            {(() => {
+                              const hasToolCalls = msg.role === 'assistant' && 
+                                msg.metadata?.tool_calls && 
+                                Array.isArray(msg.metadata.tool_calls) && 
+                                msg.metadata.tool_calls.length > 0
+                              const isStreamComplete = streamComplete.has(msg.id)
+                              if (hasToolCalls && !isStreamComplete) {
+                                console.log('[Tool Items] Has tool_calls but stream not complete yet. Message ID:', msg.id, 'Tool calls:', msg.metadata.tool_calls)
+                              }
+                              return hasToolCalls && isStreamComplete
+                            })() && (
                               <div className="mt-3 px-1 space-y-2">
                                 {msg.metadata.tool_calls.map((toolCall: any, idx: number) => {
                                   const toolCallId = `tool-${msg.id}-${idx}`
@@ -1487,45 +1729,10 @@ export default function ChatPage() {
                             </div>
                           )}
                         </div>
-                      )
-                    })}
-                    {/* Show loading indicator for non-streaming mode when waiting */}
-                    {waitingForResponse && !useStreaming && (
-                      <div className="flex gap-3 items-start justify-start">
-                        <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-1">
-                          <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                          </svg>
-                        </div>
-                        <div className="flex flex-col max-w-[85%]">
-                          <div className="rounded-2xl px-4 py-3 inline-block bg-muted">
-                            <div className="flex items-center gap-1.5 py-1">
-                              <span 
-                                className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                style={{ 
-                                  animation: 'breathe 1.4s ease-in-out infinite',
-                                  animationDelay: '0ms'
-                                }}
-                              ></span>
-                              <span 
-                                className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                style={{ 
-                                  animation: 'breathe 1.4s ease-in-out infinite',
-                                  animationDelay: '200ms'
-                                }}
-                              ></span>
-                              <span 
-                                className="w-2 h-2 bg-muted-foreground rounded-full" 
-                                style={{ 
-                                  animation: 'breathe 1.4s ease-in-out infinite',
-                                  animationDelay: '400ms'
-                                }}
-                              ></span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                        )
+                      })
+                    })()}
+                    {/* Loading indicator removed - status messages are now shown as system messages */}
                     <div ref={messagesEndRef} />
                   </div>
                 </div>
@@ -2030,13 +2237,39 @@ export default function ChatPage() {
                                     const activityKey = `${chain.trace_id}-${activity.id || String(activityIndex)}`
                                     const isExpanded = expandedActivities.includes(activityKey)
                                     const hasDetails = !!(activity.model || activity.tools?.length || activity.input_preview || activity.output_preview || activity.message)
+                                    // Get indentation level (0 = root, 1 = child, 2 = grandchild, etc.)
+                                    const level = activity.level || 0
+                                    const indentPx = level * 20  // 20px per level
                                     
                                     return (
                                       <div key={activity.id || activityIndex} className="relative">
-                                        {/* Timeline dot */}
-                                        <div className="absolute -left-3 top-0 w-3 h-3 rounded-full bg-primary/70 border-2 border-background"></div>
-                                        
-                                        <div className="space-y-2">
+                                        {/* Indentation container */}
+                                        <div style={{ marginLeft: `${indentPx}px`, position: 'relative' }}>
+                                          {/* Vertical connecting lines for nested activities */}
+                                          {level > 0 && (
+                                            <>
+                                              {/* Vertical line from parent */}
+                                              <div 
+                                                className="absolute top-0 bottom-0 w-0.5 bg-muted/50" 
+                                                style={{ 
+                                                  left: `${-20}px`,
+                                                  height: '100%'
+                                                }}
+                                              ></div>
+                                              {/* Horizontal connector line */}
+                                              <div 
+                                                className="absolute top-2 w-4 h-0.5 bg-muted/50" 
+                                                style={{ 
+                                                  left: `${-20}px`
+                                                }}
+                                              ></div>
+                                            </>
+                                          )}
+                                          
+                                          {/* Timeline dot */}
+                                          <div className="absolute -left-3 top-0 w-3 h-3 rounded-full bg-primary/70 border-2 border-background z-10"></div>
+                                          
+                                          <div className="space-y-2">
                                           {/* Activity Header - Clickable if has details */}
                                           <div 
                                             className={`flex items-start justify-between ${hasDetails ? 'cursor-pointer hover:bg-muted/50 rounded p-2 -m-2' : ''}`}
@@ -2154,6 +2387,7 @@ export default function ChatPage() {
                                               )}
                                             </div>
                                           )}
+                                          </div>
                                         </div>
                                       </div>
                                     )

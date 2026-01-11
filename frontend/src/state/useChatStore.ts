@@ -24,6 +24,9 @@ export interface Message {
   metadata?: {
     agent_name?: string
     tool_calls?: Array<Record<string, unknown>>
+    status_type?: string
+    task?: string
+    is_completed?: boolean
   }
   response_type?: 'answer' | 'plan_proposal'
   plan?: {
@@ -40,6 +43,7 @@ export interface Message {
   }
   clarification?: string
   raw_tool_outputs?: Array<Record<string, any>>
+  status?: string  // Current task/status message (e.g., "Thinking...", "Searching documents...")
 }
 
 interface ChatState {
@@ -110,21 +114,67 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
   loadMessages: async (sessionId: number) => {
     try {
       const response = await chatAPI.getMessages(sessionId)
-      // Map backend messages to frontend Message format, extracting plan_proposal, clarification, etc. from metadata
-      const mappedMessages: Message[] = response.data.messages.map((msg: any) => ({
-        id: msg.id,
-        role: msg.role,
-        content: msg.content,
-        tokens_used: msg.tokens_used,
-        created_at: msg.created_at,
-        metadata: msg.metadata || {},
-        // Extract plan_proposal, clarification, raw_tool_outputs from metadata
-        response_type: msg.metadata?.response_type,
-        plan: msg.metadata?.plan,
-        clarification: msg.metadata?.clarification,
-        raw_tool_outputs: msg.metadata?.raw_tool_outputs,
-      }))
-      set({ messages: mappedMessages })
+      // Map backend messages to frontend Message format, extracting ALL fields from metadata
+      // This ensures all displayed data (agent_name, tool_calls, status, etc.) is restored
+      const mappedMessages: Message[] = response.data.messages.map((msg: any) => {
+        const metadata = msg.metadata || {}
+        return {
+          id: msg.id,
+          role: msg.role,
+          content: msg.content,
+          tokens_used: msg.tokens_used,
+          created_at: msg.created_at,
+          metadata: {
+            // Ensure agent_name is always in metadata for display
+            agent_name: metadata.agent_name,
+            // Ensure tool_calls array is preserved with all statuses
+            tool_calls: metadata.tool_calls || [],
+            // Preserve status message metadata
+            status_type: metadata.status_type,
+            task: metadata.task,
+            is_completed: metadata.is_completed,
+            // Preserve any other metadata fields
+            ...metadata,
+          },
+          // Extract top-level fields from metadata for easier access
+          response_type: metadata.response_type,
+          plan: metadata.plan,
+          clarification: metadata.clarification,
+          raw_tool_outputs: metadata.raw_tool_outputs,
+          // Note: status is transient (only during streaming), not persisted
+          // Tool call statuses ARE persisted in metadata.tool_calls[].status
+        }
+      })
+      // Filter out any temporary messages (those with negative IDs or very large IDs)
+      // Real database IDs are positive and typically much smaller
+      const realMessages = mappedMessages.filter((msg: Message) => {
+        // Keep all messages with reasonable positive IDs (likely from DB)
+        // Temporary messages have negative IDs (for real-time streaming) or very large numbers
+        return msg.id > 0 && msg.id < 1000000000000
+      })
+      
+      // Deduplicate messages by ID (in case backend returns duplicates)
+      const seenIds = new Set<number>()
+      const uniqueMessages = realMessages.filter((msg: Message) => {
+        if (seenIds.has(msg.id)) {
+          return false
+        }
+        seenIds.add(msg.id)
+        return true
+      })
+      
+      // When loading messages for a session, clear all temporary status messages
+      // They are ephemeral and session-specific - should not persist across session switches
+      set((state: ChatState) => {
+        // Filter out any system status messages from DB (they shouldn't exist, but just in case)
+        const dbMessagesWithoutStatus = uniqueMessages.filter(
+          (msg: Message) => !(msg.role === 'system' && msg.metadata?.status_type === 'task_status')
+        )
+        
+        // Don't preserve temporary status messages when loading a new session
+        // They are ephemeral and should only exist during active streaming
+        return { messages: dbMessagesWithoutStatus }
+      })
     } catch (error: unknown) {
       set({ error: getErrorMessage(error, 'Failed to load messages') })
     }
