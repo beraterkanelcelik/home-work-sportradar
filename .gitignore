@@ -75,3 +75,6 @@ backend/db.sqlite3
 
 # Docker Compose
 langfuse-official-compose.yml
+
+# Documentation
+/docs/
