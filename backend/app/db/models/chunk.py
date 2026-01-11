@@ -35,8 +35,8 @@ class DocumentChunk(models.Model):
         db_table = 'document_chunks'
         ordering = ['document', 'chunk_index']
         indexes = [
-            models.Index(fields=['document', 'chunk_index']),
-            models.Index(fields=['document', 'content_hash']),
+            models.Index(fields=['document', 'chunk_index'], name='document_ch_documen_15f3c0_idx'),
+            models.Index(fields=['document', 'content_hash'], name='document_ch_documen_552b82_idx'),
         ]
         unique_together = [['document', 'chunk_index']]
     
@@ -65,7 +65,7 @@ class ChunkEmbedding(models.Model):
     class Meta:
         db_table = 'chunk_embeddings'
         indexes = [
-            models.Index(fields=['embedding_model']),
+            models.Index(fields=['embedding_model'], name='chunk_embed_embeddi_88d9e0_idx'),
         ]
         # HNSW index will be added via migration
         # indexes = [

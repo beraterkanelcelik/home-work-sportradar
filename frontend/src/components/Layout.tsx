@@ -2,6 +2,7 @@ import React from 'react'
 import { Outlet, Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
+import ServiceStatus from '@/components/ServiceStatus'
 import logo from '@/assets/logoAPblacktransparent.png'
 
 export default function Layout() {
@@ -26,6 +27,7 @@ export default function Layout() {
             <span className="text-2xl font-bold">Agent Playground</span>
           </Link>
           <div className="flex gap-4 items-center">
+            <ServiceStatus />
             {isAuthenticated ? (
               <>
                 <Link to="/dashboard">

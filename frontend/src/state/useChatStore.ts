@@ -25,6 +25,21 @@ export interface Message {
     agent_name?: string
     tool_calls?: Array<Record<string, unknown>>
   }
+  response_type?: 'answer' | 'plan_proposal'
+  plan?: {
+    type: string
+    plan: Array<{
+      action: string
+      tool: string
+      props: Record<string, any>
+      agent: string
+      query: string
+    }>
+    plan_index: number
+    plan_total: number
+  }
+  clarification?: string
+  raw_tool_outputs?: Array<Record<string, any>>
 }
 
 interface ChatState {
@@ -95,7 +110,21 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
   loadMessages: async (sessionId: number) => {
     try {
       const response = await chatAPI.getMessages(sessionId)
-      set({ messages: response.data.messages })
+      // Map backend messages to frontend Message format, extracting plan_proposal, clarification, etc. from metadata
+      const mappedMessages: Message[] = response.data.messages.map((msg: any) => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        tokens_used: msg.tokens_used,
+        created_at: msg.created_at,
+        metadata: msg.metadata || {},
+        // Extract plan_proposal, clarification, raw_tool_outputs from metadata
+        response_type: msg.metadata?.response_type,
+        plan: msg.metadata?.plan,
+        clarification: msg.metadata?.clarification,
+        raw_tool_outputs: msg.metadata?.raw_tool_outputs,
+      }))
+      set({ messages: mappedMessages })
     } catch (error: unknown) {
       set({ error: getErrorMessage(error, 'Failed to load messages') })
     }

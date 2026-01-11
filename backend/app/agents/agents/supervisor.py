@@ -17,6 +17,7 @@ class SupervisorAgent(BaseAgent):
     # Available agents - can be moved to config or registry in future
     AVAILABLE_AGENTS = {
         "greeter": "Provides welcome messages and guidance. Use when user needs help or is starting.",
+        "search": "Searches through user's uploaded documents and answers questions using RAG. Use when user asks about their documents, wants to search for information, or asks questions that might be in their uploaded files.",
         "gmail": "Handles email-related tasks. Use when user asks about emails, messages, or mail.",
     }
     
@@ -43,10 +44,11 @@ Your task is to analyze the user's message and determine which agent should hand
 Consider:
 - User intent and what they're asking for
 - Whether this is a first message or help request (→ greeter)
+- Whether user wants to search documents or ask questions about their uploaded files (→ search)
 - Whether it's email-related (→ gmail)
 - If unclear, route to greeter for guidance
 
-Respond with ONLY the agent name (e.g., "greeter" or "gmail"). Do not include any other text."""
+Respond with ONLY the agent name (e.g., "greeter", "search", or "gmail"). Do not include any other text."""
     
     def route_message(self, messages: List[BaseMessage], **kwargs) -> str:
         """

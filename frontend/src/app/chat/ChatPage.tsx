@@ -9,6 +9,7 @@ import { chatAPI, agentAPI, documentAPI, modelsAPI } from '@/lib/api'
 import { getErrorMessage } from '@/lib/utils'
 import MarkdownMessage from '@/components/MarkdownMessage'
 import JsonViewer from '@/components/JsonViewer'
+import PlanProposal, { type PlanProposalData } from '@/components/PlanProposal'
 
 
 export default function ChatPage() {
@@ -44,6 +45,7 @@ export default function ChatPage() {
   const [sessionMenuOpen, setSessionMenuOpen] = useState<number | null>(null)
   const [renameSessionId, setRenameSessionId] = useState<number | null>(null)
   const [renameSessionTitle, setRenameSessionTitle] = useState<string>('')
+  const [executingPlanMessageId, setExecutingPlanMessageId] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<ReturnType<typeof createAgentStream> | null>(null)
   const initialMessageSentRef = useRef(false)
@@ -212,6 +214,57 @@ export default function ChatPage() {
                   ),
                 }
               })
+            } else if (event.type === 'update') {
+              // Handle workflow state updates (agent_name, tool_calls, plan_proposal, etc.)
+              set((state: { messages: Message[] }) => {
+                const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+                if (!currentMessage) return state
+                
+                const updateData = event.data || {}
+                const updatedMetadata = {
+                  ...currentMessage.metadata,
+                  ...(updateData.agent_name && { agent_name: updateData.agent_name }),
+                  ...(updateData.tool_calls && { tool_calls: updateData.tool_calls }),
+                }
+                
+                // Check if this is a plan_proposal response
+                const updates: Partial<Message> = {
+                  metadata: updatedMetadata,
+                }
+                
+                if (updateData.type === 'plan_proposal' && updateData.plan) {
+                  updates.response_type = 'plan_proposal'
+                  updates.plan = updateData.plan
+                }
+                
+                if (updateData.clarification) {
+                  updates.clarification = updateData.clarification
+                }
+                
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? { ...msg, ...updates }
+                      : msg
+                  ),
+                }
+              })
+            } else if (event.type === 'done') {
+              // Handle completion event with final data
+              const doneData = event.data || {}
+              set((state: { messages: Message[] }) => {
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? {
+                          ...msg,
+                          ...(doneData.tokens_used && { tokens_used: doneData.tokens_used }),
+                          ...(doneData.raw_tool_outputs && { raw_tool_outputs: doneData.raw_tool_outputs }),
+                        }
+                      : msg
+                  ),
+                }
+              })
             } else if (event.type === 'error') {
               toast.error(event.data?.error || 'Streaming error occurred')
               setSending(false)
@@ -227,6 +280,7 @@ export default function ChatPage() {
           },
           () => {
             // Stream complete, reload messages to get final saved version
+            // This will also update any plan_proposal or other response types from backend
             loadMessages(currentSession.id)
             setSending(false)
             setWaitingForResponse(false)
@@ -244,6 +298,33 @@ export default function ChatPage() {
             chat_session_id: currentSession.id,
             message: content,
           })
+          
+          // Check if response contains plan_proposal
+          if (response.data?.type === 'plan_proposal' && response.data?.plan) {
+            // Update the assistant message with plan proposal
+            set((state: { messages: Message[] }) => {
+              const lastMessage = state.messages[state.messages.length - 1]
+              if (lastMessage && lastMessage.role === 'assistant') {
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === lastMessage.id
+                      ? {
+                          ...msg,
+                          response_type: 'plan_proposal',
+                          plan: response.data.plan,
+                          metadata: {
+                            ...msg.metadata,
+                            agent_name: response.data.agent_name || msg.metadata?.agent_name,
+                          },
+                        }
+                      : msg
+                  ),
+                }
+              }
+              return state
+            })
+          }
+          
           // Reload messages to get both user and assistant messages from backend
           loadMessages(currentSession.id)
         } finally {
@@ -504,6 +585,174 @@ export default function ChatPage() {
     setPlusMenuOpen(false)
     fileInputRef.current?.click()
   }
+
+  // Handle plan approval
+  const handlePlanApproval = useCallback(async (messageId: number, plan: PlanProposalData) => {
+    if (!currentSession || sending) return
+
+    setExecutingPlanMessageId(messageId)
+    setSending(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        throw new Error('No authentication token')
+      }
+
+      // Extract plan steps from proposal
+      const planSteps = plan.plan.map((step) => ({
+        action: step.action,
+        tool: step.tool,
+        props: step.props,
+        agent: step.agent,
+        query: step.query,
+      }))
+
+      if (useStreaming) {
+        // Create streaming message for plan execution
+        const executionMessageId = Date.now() + 1
+        setWaitingForResponse(true)
+        setWaitingMessageId(executionMessageId)
+        set((state: { messages: Message[] }) => ({
+          messages: [
+            ...state.messages,
+            {
+              id: executionMessageId,
+              role: 'assistant' as const,
+              content: '',
+              tokens_used: 0,
+              created_at: new Date().toISOString(),
+              metadata: { agent_name: plan.plan[0]?.agent || 'greeter' },
+              response_type: 'answer',
+            },
+          ],
+        }))
+
+        // Stream plan execution
+        const stream = createAgentStream(
+          currentSession.id,
+          '', // Empty message for plan execution
+          token,
+          (event: StreamEvent) => {
+            if (event.type === 'token') {
+              setWaitingForResponse(false)
+              setWaitingMessageId(null)
+              set((state: { messages: Message[] }) => {
+                const currentMessage = state.messages.find((msg: Message) => msg.id === executionMessageId)
+                const currentContent = currentMessage?.content || ''
+                const newContent = currentContent + event.data
+                
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === executionMessageId
+                      ? { ...msg, content: newContent }
+                      : msg
+                  ),
+                }
+              })
+            } else if (event.type === 'update') {
+              const updateData = event.data || {}
+              set((state: { messages: Message[] }) => {
+                const currentMessage = state.messages.find((msg: Message) => msg.id === executionMessageId)
+                if (!currentMessage) return state
+                
+                const updatedMetadata = {
+                  ...currentMessage.metadata,
+                  ...(updateData.agent_name && { agent_name: updateData.agent_name }),
+                  ...(updateData.tool_calls && { tool_calls: updateData.tool_calls }),
+                }
+                
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === executionMessageId
+                      ? { ...msg, metadata: updatedMetadata }
+                      : msg
+                  ),
+                }
+              })
+            } else if (event.type === 'done') {
+              const doneData = event.data || {}
+              set((state: { messages: Message[] }) => {
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === executionMessageId
+                      ? {
+                          ...msg,
+                          ...(doneData.tokens_used && { tokens_used: doneData.tokens_used }),
+                        }
+                      : msg
+                  ),
+                }
+              })
+            } else if (event.type === 'error') {
+              toast.error(event.data?.error || 'Plan execution error')
+              setSending(false)
+              setWaitingForResponse(false)
+              setWaitingMessageId(null)
+            }
+          },
+          (error: Error) => {
+            toast.error(error.message || 'Plan execution connection error')
+            setSending(false)
+            setWaitingForResponse(false)
+            setWaitingMessageId(null)
+          },
+          () => {
+            loadMessages(currentSession.id)
+            setSending(false)
+            setWaitingForResponse(false)
+            setWaitingMessageId(null)
+            setExecutingPlanMessageId(null)
+          },
+          planSteps,
+          'plan'
+        )
+
+        streamRef.current = stream
+      } else {
+        // Non-streaming plan execution
+        setWaitingForResponse(true)
+        setWaitingMessageId(null)
+        try {
+          const response = await agentAPI.runAgent({
+            chat_session_id: currentSession.id,
+            message: '', // Empty message for plan execution
+            plan_steps: planSteps,
+            flow: 'plan',
+          })
+          
+          // Reload messages to get execution results
+          loadMessages(currentSession.id)
+        } finally {
+          setSending(false)
+          setWaitingForResponse(false)
+          setWaitingMessageId(null)
+          setExecutingPlanMessageId(null)
+        }
+      }
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to execute plan'))
+      setSending(false)
+      setExecutingPlanMessageId(null)
+    }
+  }, [currentSession, sending, useStreaming, loadMessages])
+
+  // Handle plan rejection
+  const handlePlanRejection = useCallback((messageId: number) => {
+    // Update message to show rejection
+    set((state: { messages: Message[] }) => ({
+      messages: state.messages.map((msg: Message) =>
+        msg.id === messageId
+          ? {
+              ...msg,
+              content: msg.content || 'Plan rejected. You can modify your query or continue the conversation.',
+              response_type: 'answer',
+            }
+          : msg
+      ),
+    }))
+    toast.info('Plan rejected')
+  }, [])
 
   return (
     <>
@@ -960,6 +1209,11 @@ export default function ChatPage() {
                       const agentName = getAgentName(msg)
                       // Show loading indicator for streaming mode when message exists but has no content yet
                       const isWaiting = useStreaming && waitingForResponse && msg.id === waitingMessageId && !msg.content
+                      const isPlanProposal = msg.response_type === 'plan_proposal' && msg.plan
+                      const isExecutingPlan = executingPlanMessageId === msg.id
+                      const hasClarification = msg.clarification
+                      const hasRawToolOutputs = msg.raw_tool_outputs && msg.raw_tool_outputs.length > 0
+                      
                       return (
                         <div
                           key={msg.id}
@@ -1013,10 +1267,63 @@ export default function ChatPage() {
                                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
                                   {msg.content}
                                 </p>
+                              ) : isPlanProposal && msg.plan ? (
+                                // Plan proposal rendering
+                                <PlanProposal
+                                  plan={msg.plan}
+                                  onApprove={() => handlePlanApproval(msg.id, msg.plan!)}
+                                  onReject={() => handlePlanRejection(msg.id)}
+                                  isExecuting={isExecutingPlan}
+                                />
+                              ) : hasClarification ? (
+                                // Clarification request rendering
+                                <div className="space-y-3">
+                                  <div className="text-sm text-muted-foreground italic">
+                                    {msg.clarification}
+                                  </div>
+                                  <div className="text-sm">
+                                    Please provide clarification to continue.
+                                  </div>
+                                </div>
                               ) : (
+                                // Regular answer rendering
                                 <MarkdownMessage content={msg.content} />
                               )}
                             </div>
+                            
+                            {/* Raw tool outputs from plan execution */}
+                            {hasRawToolOutputs && (
+                              <div className="mt-3 px-1 space-y-2">
+                                <div className="text-xs font-semibold text-muted-foreground mb-2">
+                                  Plan Execution Results:
+                                </div>
+                                {msg.raw_tool_outputs!.map((output, idx) => (
+                                  <div
+                                    key={idx}
+                                    className="border rounded-lg bg-muted/30 p-3 space-y-2"
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-sm font-medium">
+                                        {output.tool || `Tool ${idx + 1}`}
+                                      </span>
+                                    </div>
+                                    {output.output && (
+                                      <div className="text-xs bg-background/50 p-2 rounded border max-h-64 overflow-auto">
+                                        <JsonViewer 
+                                          data={output.output} 
+                                          collapsed={2}
+                                        />
+                                      </div>
+                                    )}
+                                    {output.error && (
+                                      <div className="text-xs text-destructive bg-destructive/10 p-2 rounded">
+                                        Error: {output.error}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                             {/* Tool calls - collapsible boxes (displayed at end of message) */}
                             {msg.role === 'assistant' && msg.metadata?.tool_calls && Array.isArray(msg.metadata.tool_calls) && msg.metadata.tool_calls.length > 0 && (
                               <div className="mt-3 px-1 space-y-2">
@@ -1132,6 +1439,34 @@ export default function ChatPage() {
                                                 <JsonViewer 
                                                   data={toolCall.result} 
                                                   collapsed={2}
+                                                />
+                                              </div>
+                                            </div>
+                                          )}
+                                          
+                                          {/* Tool execution status */}
+                                          {toolCall.status && (
+                                            <div>
+                                              <div className="text-xs font-semibold text-muted-foreground mb-1">Status</div>
+                                              <div className={`text-xs px-2 py-1 rounded inline-block ${
+                                                toolCall.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                toolCall.status === 'executing' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' :
+                                                toolCall.status === 'error' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                'bg-muted text-muted-foreground'
+                                              }`}>
+                                                {toolCall.status}
+                                              </div>
+                                            </div>
+                                          )}
+                                          
+                                          {/* Raw tool output (for plan execution) */}
+                                          {toolCall.raw_output && (
+                                            <div>
+                                              <div className="text-xs font-semibold text-muted-foreground mb-1">Raw Output</div>
+                                              <div className="max-h-64 overflow-auto border rounded bg-background/50 p-2">
+                                                <JsonViewer 
+                                                  data={toolCall.raw_output} 
+                                                  collapsed={1}
                                                 />
                                               </div>
                                             </div>

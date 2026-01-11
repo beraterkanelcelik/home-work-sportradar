@@ -45,6 +45,8 @@ def run_agent(request):
         data = json.loads(request.body)
         chat_session_id = data.get('chat_session_id')
         message = data.get('message', '').strip()
+        plan_steps = data.get('plan_steps')
+        flow = data.get('flow', 'main')
         
         if not chat_session_id:
             logger.warning(f"Missing chat_session_id in run_agent request from user {user.id}")
@@ -53,7 +55,8 @@ def run_agent(request):
                 status=400
             )
         
-        if not message:
+        # For plan execution, message can be empty
+        if flow != 'plan' and not message:
             logger.warning(f"Empty message in run_agent request from user {user.id}")
             return JsonResponse(
                 {'error': 'message is required'},
@@ -62,22 +65,25 @@ def run_agent(request):
         
         # Generate run ID
         run_id = str(uuid.uuid4())
-        logger.info(f"Running agent for user {user.id}, session {chat_session_id}, run_id {run_id}")
+        logger.info(f"Running agent for user {user.id}, session {chat_session_id}, run_id {run_id}, flow: {flow}")
         
-        # Save user message first
-        from app.services.chat_service import add_message
-        try:
-            user_message = add_message(chat_session_id, 'user', message)
-            logger.debug(f"Saved user message {user_message.id} before agent execution")
-        except Exception as e:
-            logger.error(f"Error saving user message: {e}", exc_info=True)
-            return JsonResponse({'error': 'Failed to save user message'}, status=500)
+        # Save user message first (only if not plan execution)
+        if flow != 'plan' and message:
+            from app.services.chat_service import add_message
+            try:
+                user_message = add_message(chat_session_id, 'user', message)
+                logger.debug(f"Saved user message {user_message.id} before agent execution")
+            except Exception as e:
+                logger.error(f"Error saving user message: {e}", exc_info=True)
+                return JsonResponse({'error': 'Failed to save user message'}, status=500)
         
         # Execute agent
         result = execute_agent(
             user_id=user.id,
             chat_session_id=chat_session_id,
-            message=message
+            message=message,
+            plan_steps=plan_steps,
+            flow=flow
         )
         
         if not result.get("success"):
@@ -88,12 +94,27 @@ def run_agent(request):
             )
         
         logger.info(f"Agent execution completed successfully for run_id {run_id}")
-        return JsonResponse({
+        response_data = {
             'run_id': run_id,
             'response': result.get("response", ""),
             'agent': result.get("agent"),
             'tool_calls': result.get("tool_calls", []),
-        })
+        }
+        
+        # Include type and plan if this is a plan_proposal response
+        if result.get("type") == "plan_proposal":
+            response_data["type"] = "plan_proposal"
+            if result.get("plan"):
+                response_data["plan"] = result.get("plan")
+        
+        # Include clarification and raw_tool_outputs if present
+        if result.get("clarification"):
+            response_data["clarification"] = result.get("clarification")
+        
+        if result.get("raw_tool_outputs"):
+            response_data["raw_tool_outputs"] = result.get("raw_tool_outputs")
+        
+        return JsonResponse(response_data)
     
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in run_agent request: {e}")
@@ -130,6 +151,8 @@ def stream_agent(request):
         data = json.loads(request.body)
         chat_session_id = data.get('chat_session_id')
         message = data.get('message', '').strip()
+        plan_steps = data.get('plan_steps')
+        flow = data.get('flow', 'main')
         
         if not chat_session_id:
             logger.warning(f"Missing chat_session_id in stream_agent request from user {user.id}")
@@ -138,23 +161,25 @@ def stream_agent(request):
                 status=400
             )
         
-        if not message:
+        # For plan execution, message can be empty
+        if flow != 'plan' and not message:
             logger.warning(f"Empty message in stream_agent request from user {user.id}")
             return JsonResponse(
                 {'error': 'message is required'},
                 status=400
             )
         
-        logger.info(f"Starting agent stream for user {user.id}, session {chat_session_id}")
+        logger.info(f"Starting agent stream for user {user.id}, session {chat_session_id}, flow: {flow}")
         
-        # Save user message first
-        from app.services.chat_service import add_message
-        try:
-            user_message = add_message(chat_session_id, 'user', message)
-            logger.debug(f"Saved user message {user_message.id} before streaming")
-        except Exception as e:
-            logger.error(f"Error saving user message: {e}", exc_info=True)
-            return JsonResponse({'error': 'Failed to save user message'}, status=500)
+        # Save user message first (only if not plan execution)
+        if flow != 'plan' and message:
+            from app.services.chat_service import add_message
+            try:
+                user_message = add_message(chat_session_id, 'user', message)
+                logger.debug(f"Saved user message {user_message.id} before streaming")
+            except Exception as e:
+                logger.error(f"Error saving user message: {e}", exc_info=True)
+                return JsonResponse({'error': 'Failed to save user message'}, status=500)
         
         def event_stream():
             """Generator for SSE events."""
@@ -163,7 +188,9 @@ def stream_agent(request):
                 for event in stream_agent_events(
                     user_id=user.id,
                     chat_session_id=chat_session_id,
-                    message=message
+                    message=message,
+                    plan_steps=plan_steps,
+                    flow=flow
                 ):
                     # Format as SSE
                     yield f"data: {json.dumps(event)}\n\n"

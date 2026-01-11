@@ -52,8 +52,8 @@ class Document(models.Model):
         db_table = 'documents'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['owner', 'created_at']),
-            models.Index(fields=['owner', 'status']),
+            models.Index(fields=['owner', 'created_at'], name='documents_owner_i_6162db_idx'),
+            models.Index(fields=['owner', 'status'], name='documents_owner_i_91a99b_idx'),
         ]
     
     def __str__(self):

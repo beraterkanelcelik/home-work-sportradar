@@ -94,22 +94,22 @@ class Migration(migrations.Migration):
             },
         ),
         
-        # Create indexes
+        # Create indexes with final names (to avoid rename migrations)
         migrations.AddIndex(
             model_name='document',
-            index=models.Index(fields=['owner', 'created_at'], name='documents_owner_created_idx'),
+            index=models.Index(fields=['owner', 'created_at'], name='documents_owner_i_6162db_idx'),
         ),
         migrations.AddIndex(
             model_name='document',
-            index=models.Index(fields=['owner', 'status'], name='documents_owner_status_idx'),
+            index=models.Index(fields=['owner', 'status'], name='documents_owner_i_91a99b_idx'),
         ),
         migrations.AddIndex(
             model_name='documentchunk',
-            index=models.Index(fields=['document', 'chunk_index'], name='chunks_doc_chunk_idx'),
+            index=models.Index(fields=['document', 'chunk_index'], name='document_ch_documen_15f3c0_idx'),
         ),
         migrations.AddIndex(
             model_name='documentchunk',
-            index=models.Index(fields=['document', 'content_hash'], name='chunks_doc_hash_idx'),
+            index=models.Index(fields=['document', 'content_hash'], name='document_ch_documen_552b82_idx'),
         ),
         
         # Add unique constraint
