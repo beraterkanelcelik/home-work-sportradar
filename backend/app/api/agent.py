@@ -8,11 +8,10 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.core.dependencies import get_current_user, get_current_user_async
-from app.agents.runner import execute_agent, stream_agent_events
+from app.agents.runner import execute_agent
 from app.core.logging import get_logger
 from app.core.redis import get_redis_client
-from app.core.temporal import get_temporal_client
-from app.agents.temporal.workflow_manager import get_or_create_workflow, send_message_signal
+from app.agents.temporal.workflow_manager import get_or_create_workflow
 from app.settings import TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE
 
 logger = get_logger(__name__)
@@ -266,18 +265,36 @@ async def stream_agent(request):
                             return
                         
                         # Listen to Redis messages with timeout handling
-                        timeout_seconds = 600  # 10 minutes max
+                        # Scalability: Use shorter timeout for approval waiting (5 min) vs normal streaming (10 min)
+                        # This prevents long-lived connections from consuming server resources
+                        timeout_seconds = 600  # 10 minutes max for normal streaming
+                        interrupt_wait_timeout = 300  # 5 minutes max when waiting for interrupt resume
                         loop = asyncio.get_running_loop()
                         start_time = loop.time()
+                        waiting_for_resume = False
+                        last_heartbeat_time = start_time
+                        heartbeat_interval = 30  # Send heartbeat every 30 seconds to keep connection alive
                         
                         try:
                             async for msg in pubsub.listen():
-                                # Check timeout
-                                elapsed = loop.time() - start_time
-                                if elapsed > timeout_seconds:
-                                    logger.warning(f"Redis subscription timeout after {timeout_seconds}s for channel {channel}")
-                                    yield _format_sse_event({"type": "error", "data": {"error": "Subscription timeout"}})
+                                current_time = loop.time()
+                                elapsed = current_time - start_time
+                                
+                                # Check timeout based on whether we're waiting for interrupt resume
+                                max_timeout = interrupt_wait_timeout if waiting_for_resume else timeout_seconds
+                                if elapsed > max_timeout:
+                                    logger.warning(f"Redis subscription timeout after {max_timeout}s for channel {channel} (waiting_for_resume={waiting_for_resume})")
+                                    yield _format_sse_event({"type": "error", "data": {"error": f"Subscription timeout after {max_timeout}s"}})
                                     break
+                                
+                                # Send heartbeat to keep connection alive (prevents idle timeouts)
+                                # This is a scalability best practice for long-lived SSE connections
+                                if current_time - last_heartbeat_time >= heartbeat_interval:
+                                    try:
+                                        yield _format_sse_event({"type": "heartbeat", "data": {"timestamp": current_time}})
+                                        last_heartbeat_time = current_time
+                                    except Exception as e:
+                                        logger.debug(f"Failed to send heartbeat: {e}")
                                 
                                 # Filter subscription confirmation messages
                                 if msg['type'] == 'subscribe' or msg['type'] == 'psubscribe':
@@ -288,7 +305,17 @@ async def stream_agent(request):
                                     try:
                                         event_data = json.loads(msg['data'].decode('utf-8'))
                                         yield _format_sse_event(event_data)
-                                        if event_data.get("type") in ["final", "error", "done"]:
+                                        event_type = event_data.get("type")
+                                        
+                                        # Track if we're waiting for interrupt resume (affects timeout)
+                                        if event_type == "interrupt":
+                                            waiting_for_resume = True
+                                            logger.info(f"[HITL] [SSE] Received interrupt event, connection will timeout after {interrupt_wait_timeout}s if no resume session={chat_session_id}")
+                                            # Don't break - keep connection open but with shorter timeout
+                                            # This balances scalability (timeout) with UX (no reconnection needed)
+                                            continue
+                                        elif event_type in ["final", "error", "done"]:
+                                            # Close connection on final/error/done
                                             break
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"Failed to decode Redis message: {e}")
@@ -407,4 +434,90 @@ async def stream_agent(request):
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     except Exception as e:
         logger.error(f"Unexpected error in stream_agent endpoint: {e}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+async def approve_tool(request):
+    """
+    Resume interrupted workflow with approval decisions (LangGraph native interrupt pattern).
+    
+    Request body:
+    {
+        "chat_session_id": int,
+        "resume": {
+            "approvals": {
+                "tool_call_id": {
+                    "approved": bool,
+                    "args": dict  # Optional edited args
+                }
+            }
+        }
+    }
+    
+    Returns:
+    {
+        "success": bool,
+        "error": str (if failed)
+    }
+    """
+    user = await get_current_user_async(request)
+    if not user:
+        logger.warning("Unauthenticated request to approve_tool endpoint")
+        return JsonResponse(
+            {'error': 'Authentication required'},
+            status=401
+        )
+    
+    try:
+        data = json.loads(request.body)
+        chat_session_id = data.get('chat_session_id')
+        resume = data.get('resume')
+        
+        if not chat_session_id:
+            logger.warning(f"Missing chat_session_id in approve_tool request from user {user.id}")
+            return JsonResponse(
+                {'error': 'chat_session_id is required'},
+                status=400
+            )
+        
+        if not resume:
+            logger.warning(f"Missing resume in approve_tool request from user {user.id}")
+            return JsonResponse(
+                {'error': 'resume is required'},
+                status=400
+            )
+        
+        logger.info(f"[HITL] [RESUME] Resume request received: user={user.id} session={chat_session_id} resume_keys={list(resume.keys()) if isinstance(resume, dict) else 'N/A'}")
+        
+        # Send resume signal to Temporal workflow (human-in-the-loop integration)
+        try:
+            from app.agents.temporal.workflow_manager import get_or_create_workflow
+            workflow_handle = await get_or_create_workflow(user.id, chat_session_id)
+            
+            # Send resume signal with resume_payload
+            await workflow_handle.signal(
+                "resume",
+                args=(resume,)
+            )
+            logger.info(f"[HITL] [RESUME] Sent resume signal to workflow: session={chat_session_id}")
+        except Exception as e:
+            logger.error(f"[HITL] [RESUME] Failed to send resume signal to workflow: error={e} session={chat_session_id}", exc_info=True)
+            return JsonResponse({
+                'success': False,
+                'error': f'Failed to send resume signal: {str(e)}'
+            }, status=500)
+        
+        logger.info(f"[HITL] [RESUME] Resume flow completed: session={chat_session_id}")
+        
+        return JsonResponse({
+            'success': True,
+        })
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in approve_tool request: {e}")
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error in approve_tool endpoint: {e}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)

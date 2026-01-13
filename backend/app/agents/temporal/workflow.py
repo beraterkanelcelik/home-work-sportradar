@@ -59,6 +59,8 @@ class ChatWorkflow:
         self.initial_state: Dict[str, Any] = {}
         # Track processed messages to prevent duplicates (use content hash)
         self.processed_messages: set = set()
+        # Track resume payload for interrupt resume (human-in-the-loop)
+        self.resume_payload: Optional[Any] = None
     
     @workflow.signal
     def new_message(self, message: str, plan_steps: Optional[list] = None, flow: str = "main") -> None:
@@ -103,6 +105,39 @@ class ChatWorkflow:
         self.last_activity_time = workflow.now().timestamp()
         workflow.logger.info(f"[SIGNAL_RECEIVE] Received message signal session={workflow.info().workflow_id} message_preview={message[:50]}... queue_size={len(self.pending_messages)}")
     
+    @workflow.signal
+    def resume(self, resume_payload: Any) -> None:
+        """
+        Signal handler for resuming interrupted workflow (human-in-the-loop).
+        
+        Args:
+            resume_payload: Resume payload containing approval decisions
+                           Expected shape: {"approvals": {"tool_call_id": {"approved": bool, "args": {...}}}}
+        """
+        if self.is_closing:
+            workflow.logger.warning("Workflow is closing, ignoring resume signal")
+            return
+        
+        # Envelope resume_payload with session_id for workflow access
+        # This ensures session_id is available when Command(resume=...) is processed
+        chat_id = int(workflow.info().workflow_id.split("-")[-1])  # Extract from workflow_id format: "chat-1-{chat_id}"
+        if isinstance(resume_payload, dict):
+            # Add session_id to resume payload so workflow can access it
+            enveloped_payload = {
+                "session_id": chat_id,
+                **resume_payload  # Preserve original payload structure
+            }
+        else:
+            # If resume_payload is not a dict, wrap it
+            enveloped_payload = {
+                "session_id": chat_id,
+                "approvals": resume_payload if isinstance(resume_payload, dict) else {}
+            }
+        
+        self.resume_payload = enveloped_payload
+        workflow.logger.info(f"[HITL] Received resume signal: session_id={chat_id}, resume_payload keys={list(enveloped_payload.keys())} session={workflow.info().workflow_id}")
+        workflow.logger.info(f"[HITL] This signal will wake up wait_condition if workflow is waiting for resume session={workflow.info().workflow_id}")
+    
     @workflow.run
     async def run(
         self, 
@@ -120,7 +155,11 @@ class ChatWorkflow:
         Returns:
             Dictionary with final status
         """
-        workflow.logger.info(f"Starting long-running chat workflow for session {chat_id}")
+        # CRITICAL: Use both logger and print for debugging - Temporal may suppress logger output
+        print(f"[WORKFLOW_START] Starting long-running chat workflow for session {chat_id}")
+        print(f"[WORKFLOW_START] Workflow ID: {workflow.info().workflow_id}, Run ID: {workflow.info().run_id}")
+        workflow.logger.info(f"[WORKFLOW_START] Starting long-running chat workflow for session {chat_id}")
+        workflow.logger.info(f"[WORKFLOW_START] Workflow ID: {workflow.info().workflow_id}, Run ID: {workflow.info().run_id}")
         
         # Store initial state for use in activities
         self.initial_state = initial_state or {}
@@ -188,6 +227,9 @@ class ChatWorkflow:
                 try:
                     activity_input = ChatActivityInput(chat_id=chat_id, state=state)
                     
+                    workflow.logger.info(f"[WORKFLOW] Executing activity for message: chat_id={chat_id} message_preview={message_content[:50]}... session={chat_id}")
+                    print(f"[WORKFLOW] [BEFORE_ACTIVITY] About to call execute_activity, chat_id={chat_id}")
+                    workflow.logger.info(f"[WORKFLOW] [BEFORE_ACTIVITY] About to call execute_activity, chat_id={chat_id}")
                     result = await workflow.execute_activity(
                         run_chat_activity,
                         activity_input,
@@ -205,6 +247,71 @@ class ChatWorkflow:
                             maximum_interval=timedelta(seconds=30),
                         ),
                     )
+                    workflow.logger.info(f"[WORKFLOW] [AFTER_ACTIVITY] Activity returned, result type={type(result)}, chat_id={chat_id}")
+                    
+                    # Log activity result for debugging - CRITICAL: This must appear in worker logs
+                    workflow.logger.info(f"[WORKFLOW] [CRITICAL] Activity execution completed, processing result: type={type(result)} session={chat_id}")
+                    if isinstance(result, dict):
+                        result_status = result.get("status")
+                        result_keys = list(result.keys())
+                        workflow.logger.info(f"[WORKFLOW] Activity result received: status={result_status} keys={result_keys} session={chat_id}")
+                    else:
+                        result_status = None
+                        workflow.logger.warning(f"[WORKFLOW] Activity result is not a dict: type={type(result)} value={str(result)[:200]} session={chat_id}")
+                    
+                    # Check if activity was interrupted (human-in-the-loop)
+                    if result_status == "interrupted":
+                        print(f"[HITL] [WORKFLOW] Detected interrupted status - entering resume wait loop session={chat_id}")
+                        workflow.logger.info(f"[HITL] [WORKFLOW] Detected interrupted status - entering resume wait loop session={chat_id}")
+                        interrupt_data = result.get("interrupt")
+                        workflow.logger.info(f"[HITL] Activity returned interrupted: interrupt_data={interrupt_data} session={chat_id}")
+                        
+                        # Wait for resume signal with resume_payload
+                        try:
+                            print(f"[HITL] Entering wait_condition - workflow will pause until resume_payload is set session={chat_id}")
+                            workflow.logger.info(f"[HITL] Entering wait_condition - workflow will pause until resume_payload is set session={chat_id}")
+                            await workflow.wait_condition(
+                                lambda: self.resume_payload is not None,
+                                timeout=timedelta(minutes=10)  # 10 minute timeout for approval
+                            )
+                            print(f"[HITL] wait_condition returned - resume_payload is now set session={chat_id}")
+                            workflow.logger.info(f"[HITL] wait_condition returned - resume_payload is now set session={chat_id}")
+                            
+                            # Resume payload received, re-run activity with it
+                            resume_payload_to_use = self.resume_payload
+                            self.resume_payload = None  # Clear after use
+                            
+                            workflow.logger.info(f"[HITL] Resume received: resume_payload keys={list(resume_payload_to_use.keys()) if isinstance(resume_payload_to_use, dict) else 'N/A'} session={chat_id}")
+                            
+                            # Re-run activity with resume_payload
+                            state_with_resume = state.copy()
+                            state_with_resume["resume_payload"] = resume_payload_to_use
+                            
+                            # Re-run activity to continue execution with resume
+                            workflow.logger.info(f"[HITL] Re-running activity with resume_payload session={chat_id}")
+                            activity_input_continue = ChatActivityInput(chat_id=chat_id, state=state_with_resume)
+                            result = await workflow.execute_activity(
+                                run_chat_activity,
+                                activity_input_continue,
+                                schedule_to_close_timeout=timedelta(minutes=30),
+                                start_to_close_timeout=timedelta(minutes=10),
+                                heartbeat_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(
+                                    maximum_attempts=3,
+                                    initial_interval=timedelta(seconds=1),
+                                    backoff_coefficient=2.0,
+                                    maximum_interval=timedelta(seconds=30),
+                                ),
+                            )
+                            workflow.logger.info(f"[HITL] Activity re-run completed after resume: status={result.get('status')} has_response={result.get('has_response')} session={chat_id}")
+                            workflow.logger.info(f"[HITL] Final response should be streaming to Redis channel chat:{tenant_id}:{chat_id} session={chat_id}")
+                                
+                        except TimeoutError:
+                            workflow.logger.warning(f"[HITL] Timeout waiting for resume: timeout=10min session={chat_id}")
+                            # Continue without resume - activity will handle gracefully
+                    else:
+                        print(f"[WORKFLOW] Activity did not return interrupted - status={result_status} - continuing normally session={chat_id}")
+                        workflow.logger.info(f"[WORKFLOW] Activity did not return interrupted - status={result_status} - continuing normally session={chat_id}")
                     
                     # Mark message as processed
                     message_hash = signal_data.get('_hash')
@@ -221,7 +328,8 @@ class ChatWorkflow:
                     
                     # Update last activity time after successful processing
                     self.last_activity_time = workflow.now().timestamp()
-                    workflow.logger.info(f"[MESSAGE_PROCESS] Processed message session={chat_id} message_preview={signal_data.get('message', '')[:50]}... status={result.get('status')} event_count={result.get('event_count', 'unknown')}")
+                    result_status_for_log = result.get('status') if isinstance(result, dict) else 'unknown'
+                    workflow.logger.info(f"[MESSAGE_PROCESS] Processed message session={chat_id} message_preview={signal_data.get('message', '')[:50]}... status={result_status_for_log} event_count={result.get('event_count', 'unknown') if isinstance(result, dict) else 'unknown'}")
                     
                 except asyncio.CancelledError:
                     # Workflow was cancelled during activity execution
@@ -229,6 +337,10 @@ class ChatWorkflow:
                     self.is_closing = True
                     raise  # Re-raise to allow Temporal to handle cancellation
                 except Exception as e:
+                    print(f"[WORKFLOW] [ERROR] Exception processing message for session {chat_id}: {e}")
+                    print(f"[WORKFLOW] [ERROR] Exception type: {type(e).__name__}")
+                    import traceback
+                    print(f"[WORKFLOW] [ERROR] Traceback: {traceback.format_exc()}")
                     workflow.logger.error(f"Error processing message for session {chat_id}: {e}", exc_info=True)
                     # Continue processing other messages even if one fails
                     self.last_activity_time = workflow.now().timestamp()

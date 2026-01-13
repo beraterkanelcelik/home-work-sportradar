@@ -40,7 +40,8 @@ class AgentRunner:
         trace_id: Optional[str] = None,
         org_slug: Optional[str] = None,
         org_roles: Optional[List[str]] = None,
-        app_roles: Optional[List[str]] = None
+        app_roles: Optional[List[str]] = None,
+        resume_payload: Optional[Any] = None
     ):
         """
         Initialize the agent runner.
@@ -55,12 +56,14 @@ class AgentRunner:
             org_slug: Optional organization slug
             org_roles: Optional organization roles
             app_roles: Optional application roles
+            resume_payload: Optional resume payload for LangGraph interrupt resume (Command(resume=...))
         """
         self.user_id = user_id
         self.chat_session_id = chat_session_id
         self.message = message
         self.plan_steps = plan_steps
         self.flow = flow
+        self.resume_payload = resume_payload
         
         # Generate trace ID if not provided
         if trace_id:
@@ -74,18 +77,23 @@ class AgentRunner:
             else:
                 self.trace_id = str(uuid.uuid4())
         
-        # Build request
-        self.request = AgentRequest(
-            query=message,
-            session_id=chat_session_id,
-            user_id=user_id,
-            org_slug=org_slug,
-            org_roles=org_roles or [],
-            app_roles=app_roles or [],
-            flow=flow,
-            plan_steps=plan_steps,
-            trace_id=self.trace_id
-        )
+        # Build request or Command for resume
+        # If resume_payload is provided, use Command(resume=...) instead of AgentRequest
+        if resume_payload is not None:
+            from langgraph.types import Command
+            self.request = Command(resume=resume_payload)
+        else:
+            self.request = AgentRequest(
+                query=message,
+                session_id=chat_session_id,
+                user_id=user_id,
+                org_slug=org_slug,
+                org_roles=org_roles or [],
+                app_roles=app_roles or [],
+                flow=flow,
+                plan_steps=plan_steps,
+                trace_id=self.trace_id,
+            )
         
         # Prepare trace context
         self.trace_context = None
@@ -112,18 +120,36 @@ class AgentRunner:
         final = None
         
         # Execute with trace context if enabled
+        # Pass session_id, user_id, trace_id separately to handle Command type
+        # NOTE: Langfuse context is already managed inside ai_agent_workflow_events.run_workflow()
+        # We don't need to wrap it here again - doing so can cause context detach errors on interrupt
         if LANGFUSE_ENABLED and self.trace_context:
-            from langfuse import propagate_attributes
-            with propagate_attributes(**self.trace_context):
-                async for event in ai_agent_workflow_events(self.request):
-                    if event.get("type") == "final":
-                        final = event.get("response")
-                    elif event.get("type") == "error":
-                        raise Exception(event.get("error", "Unknown error"))
-        else:
-            async for event in ai_agent_workflow_events(self.request):
+            # Just pass trace context - let ai_agent_workflow_events handle Langfuse context internally
+            async for event in ai_agent_workflow_events(
+                self.request,
+                session_id=self.chat_session_id,
+                user_id=self.user_id,
+                trace_id=self.trace_id
+            ):
                 if event.get("type") == "final":
                     final = event.get("response")
+                elif event.get("type") == "interrupt":
+                    # Interrupt is terminal - workflow paused for approval
+                    raise Exception("Workflow interrupted - requires resume")
+                elif event.get("type") == "error":
+                    raise Exception(event.get("error", "Unknown error"))
+        else:
+            async for event in ai_agent_workflow_events(
+                self.request,
+                session_id=self.chat_session_id,
+                user_id=self.user_id,
+                trace_id=self.trace_id
+            ):
+                if event.get("type") == "final":
+                    final = event.get("response")
+                elif event.get("type") == "interrupt":
+                    # Interrupt is terminal - workflow paused for approval
+                    raise Exception("Workflow interrupted - requires resume")
                 elif event.get("type") == "error":
                     raise Exception(event.get("error", "Unknown error"))
         
@@ -151,42 +177,22 @@ class AgentRunner:
         
         try:
             # Execute with trace context if enabled
+            # Pass session_id, user_id, trace_id separately to handle Command type
+            # NOTE: Langfuse context is already managed inside ai_agent_workflow_events.run_workflow()
+            # We don't need to wrap it here again - doing so can cause context detach errors on interrupt
             if LANGFUSE_ENABLED and self.trace_context:
-                from langfuse import propagate_attributes
-                with propagate_attributes(**self.trace_context):
-                    async for event in ai_agent_workflow_events(self.request):
-                        event_type = event.get("type", "unknown")
-                        
-                        # Accumulate tokens for done event
-                        if event_type == "token":
-                            accumulated_content += event.get("value", "")
-                            # Log token events in runner to verify they're yielded (INFO for debugging)
-                            logger.info(f"[RUNNER_STREAM] Yielding token event (value_preview={event.get('value', '')[:30]}...)")
-                        
-                        # Emit to callback if provided (for Temporal/Redis)
-                        if emit:
-                            emit(event)
-                        
-                        # Yield event
-                        yield event
-                        
-                        # Check for final event
-                        if event.get("type") == "final":
-                            response = event.get("response")
-                            if response and hasattr(response, 'token_usage'):
-                                tokens_used = response.token_usage.get("total_tokens", 0)
-                            break
-                        elif event.get("type") == "error":
-                            break
-            else:
-                async for event in ai_agent_workflow_events(self.request):
+                # Just pass trace context - let ai_agent_workflow_events handle Langfuse context internally
+                async for event in ai_agent_workflow_events(
+                    self.request,
+                    session_id=self.chat_session_id,
+                    user_id=self.user_id,
+                    trace_id=self.trace_id
+                ):
                     event_type = event.get("type", "unknown")
                     
                     # Accumulate tokens for done event
                     if event_type == "token":
                         accumulated_content += event.get("value", "")
-                        # Log token events in runner to verify they're yielded (INFO for debugging)
-                        logger.info(f"[RUNNER_STREAM] Yielding token event (value_preview={event.get('value', '')[:30]}...)")
                     
                     # Emit to callback if provided (for Temporal/Redis)
                     if emit:
@@ -195,13 +201,47 @@ class AgentRunner:
                     # Yield event
                     yield event
                     
-                    # Check for final event
-                    if event.get("type") == "final":
+                    # Check for terminal events
+                    if event_type == "final":
                         response = event.get("response")
                         if response and hasattr(response, 'token_usage'):
                             tokens_used = response.token_usage.get("total_tokens", 0)
                         break
-                    elif event.get("type") == "error":
+                    elif event_type == "interrupt":
+                        # Interrupt is terminal - workflow paused for approval
+                        break
+                    elif event_type == "error":
+                        break
+            else:
+                async for event in ai_agent_workflow_events(
+                    self.request,
+                    session_id=self.chat_session_id,
+                    user_id=self.user_id,
+                    trace_id=self.trace_id
+                ):
+                    event_type = event.get("type", "unknown")
+                    
+                    # Accumulate tokens for done event
+                    if event_type == "token":
+                        accumulated_content += event.get("value", "")
+                    
+                    # Emit to callback if provided (for Temporal/Redis)
+                    if emit:
+                        emit(event)
+                    
+                    # Yield event
+                    yield event
+                    
+                    # Check for terminal events
+                    if event_type == "final":
+                        response = event.get("response")
+                        if response and hasattr(response, 'token_usage'):
+                            tokens_used = response.token_usage.get("total_tokens", 0)
+                        break
+                    elif event_type == "interrupt":
+                        # Interrupt is terminal - workflow paused for approval
+                        break
+                    elif event_type == "error":
                         break
             
             # Flush traces if enabled
@@ -350,60 +390,3 @@ async def stream_agent_events_async(
     # Stream events
     async for event in runner.stream():
         yield event
-
-
-def stream_agent_events(
-    user_id: int,
-    chat_session_id: int,
-    message: str,
-    plan_steps: Optional[List[Dict[str, Any]]] = None,
-    flow: str = "main"
-) -> Iterator[Dict[str, Any]]:
-    """
-    Synchronous wrapper for async stream_agent_events_async.
-    
-    ⚠️ NOTE: This is a temporary compatibility layer for Django sync views.
-    When migrating to ASGI-only views and Redis/Temporal streaming, this function
-    will be removed. Use stream_agent_events_async() instead.
-    
-    Uses asyncio to run the async generator in a new event loop.
-    
-    Args:
-        user_id: User ID
-        chat_session_id: Chat session ID
-        message: User message
-        plan_steps: Optional plan steps
-        flow: Flow type
-        
-    Yields:
-        Event dictionaries with type and data
-    """
-    async def _run_async():
-        async for event in stream_agent_events_async(user_id, chat_session_id, message, plan_steps, flow):
-            yield event
-    
-    # Run async generator in event loop
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            async_gen = _run_async()
-            while True:
-                try:
-                    event = loop.run_until_complete(asyncio.wait_for(async_gen.__anext__(), timeout=600))
-                    yield event
-                    if event.get("type") in ["final", "error", "done"]:
-                                                    break
-                except StopAsyncIteration:
-                                                break
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout waiting for next event")
-                    break
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.error(f"Error in stream_agent_events wrapper: {e}", exc_info=True)
-        yield {
-            "type": "error",
-            "data": {"error": str(e)}
-        }

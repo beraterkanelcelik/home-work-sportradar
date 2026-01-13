@@ -34,6 +34,17 @@ class AgentTool(ABC):
         """Tool description."""
         pass
     
+    @property
+    def requires_approval(self) -> bool:
+        """
+        Whether this tool requires human approval before execution.
+        Override to return True for tools that need human-in-the-loop.
+        
+        Returns:
+            True if tool requires approval, False otherwise (default: False)
+        """
+        return False
+    
     def execute(self, **kwargs) -> Any:
         """
         Execute tool with given arguments.

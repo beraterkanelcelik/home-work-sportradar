@@ -43,9 +43,12 @@ services:
     volumes:
       # Mount code for development (hot reload)
       - ./backend:/app
-      # Exclude cache files for better performance
+      # Exclude cache files and logs for better performance and memory usage
       - /app/__pycache__
       - /app/staticfiles
+      - /app/logs
+      - /app/*.pyc
+      - /app/**/*.pyc
     depends_on:
       db:
         condition: service_healthy
@@ -54,7 +57,8 @@ services:
     tty: true
     networks:
       - app-network
-    command: sh -c "python manage.py migrate --noinput && uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --reload"
+    # Hot-reload disabled - restart container manually for code changes
+    command: sh -c "python manage.py migrate --noinput && uvicorn app.asgi:application --host 0.0.0.0 --port 8000"
 
   # Frontend (React + Vite)
   frontend:
@@ -67,7 +71,7 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     volumes:
-      # Mount code for development (hot reload)
+      # Mount code for development (hot reload disabled - restart container for changes)
       - ./frontend:/app
       - /app/node_modules
       - /app/dist
@@ -371,6 +375,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - REDIS_AUTH=${REDIS_AUTH:-myredissecret}
     volumes:
+      # Mount code (no file watchers - restart container for changes)
       - ./backend:/app
       - /app/__pycache__
     networks:

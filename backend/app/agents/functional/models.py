@@ -16,6 +16,7 @@ class AgentRequest(BaseModel):
     flow: str = "main"  # main, direct, plan
     plan_steps: Optional[List[Dict[str, Any]]] = None  # For plan execution
     trace_id: Optional[str] = None  # Langfuse trace ID for tracing
+    approved_tool_results: Optional[Dict[str, Any]] = None  # Human-in-the-loop: approved tool results (tool_call_id -> result)
 
 
 class ToolProposal(BaseModel):
@@ -38,6 +39,7 @@ class ToolResult(BaseModel):
     args: Dict[str, Any]
     output: Any
     error: str = ""
+    tool_call_id: Optional[str] = None  # ID of the tool call that produced this result
 
 
 class AgentResponse(BaseModel):

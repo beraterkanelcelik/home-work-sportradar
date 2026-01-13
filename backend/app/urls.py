@@ -44,6 +44,7 @@ urlpatterns = [
     # Agent
     path('api/agent/run/', agent.run_agent, name='run_agent'),
     path('api/agent/stream/', agent.stream_agent, name='stream_agent'),
+    path('api/agent/approve-tool/', agent.approve_tool, name='approve_tool'),
     
     # RAG
     path('api/rag/query/', rag.rag_query, name='rag_query'),

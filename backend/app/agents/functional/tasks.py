@@ -515,6 +515,7 @@ def tool_execution_task(
     
     # Execute each tool call with Langfuse tracking
     for tool_call in tool_calls:
+        tool_call_id = tool_call.get("id")  # Extract tool_call_id if provided
         tool_name = tool_call.get("name") or tool_call.get("tool")
         tool_args = tool_call.get("args", {})
         
@@ -522,7 +523,7 @@ def tool_execution_task(
             logger.warning(f"Skipping tool call without name: {tool_call}")
             continue
         
-        logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
+        logger.info(f"Executing tool: {tool_name} with args: {tool_args}, tool_call_id={tool_call_id}")
         
         if tool_name in tool_map:
             tool = tool_map[tool_name]
@@ -574,7 +575,8 @@ def tool_execution_task(
                     tool=tool_name,
                     args=tool_args,
                     output=result,
-                    error=""
+                    error="",
+                    tool_call_id=tool_call_id  # Propagate tool_call_id to result
                 ))
                 output_preview = str(result)[:100] if result else "(empty)"
                 logger.info(f"[TOOL_EXECUTION] Tool {tool_name} executed successfully: output_length={len(str(result)) if result else 0}, output_preview={output_preview}...")
@@ -597,7 +599,8 @@ def tool_execution_task(
                     tool=tool_name,
                     args=tool_args,
                     output=None,
-                    error=str(e)
+                    error=str(e),
+                    tool_call_id=tool_call_id  # Propagate tool_call_id to result even on error
                 ))
             finally:
                 # End span
@@ -607,13 +610,82 @@ def tool_execution_task(
                     except Exception:
                         pass
         else:
-            logger.warning(f"Tool {tool_name} not found in tool_map")
-            results.append(ToolResult(
-                tool=tool_name,
-                args=tool_args,
-                output=None,
-                error=f"Tool {tool_name} is not available"
-            ))
+            # Fallback: Try to get tool from registry directly
+            logger.warning(f"Tool {tool_name} not found in tool_map for agent={agent_name}, trying tool registry")
+            try:
+                from app.agents.tools.registry import tool_registry
+                tool_instance = tool_registry.get_tool_by_name(tool_name)
+                if tool_instance:
+                    logger.info(f"Found tool {tool_name} in tool registry, executing directly")
+                    tool = tool_instance.get_tool()
+                    try:
+                        if hasattr(tool, 'invoke'):
+                            result = tool.invoke(tool_args)
+                        else:
+                            result = tool(tool_args)
+                        
+                        results.append(ToolResult(
+                            tool=tool_name,
+                            args=tool_args,
+                            output=result,
+                            error="",
+                            tool_call_id=tool_call_id  # Propagate tool_call_id to result
+                        ))
+                        output_preview = str(result)[:100] if result else "(empty)"
+                        logger.info(f"[TOOL_EXECUTION] Tool {tool_name} executed successfully via registry: output_length={len(str(result)) if result else 0}, output_preview={output_preview}...")
+                    except Exception as e:
+                        logger.error(f"Error executing tool {tool_name} from registry: {e}", exc_info=True)
+                        results.append(ToolResult(
+                            tool=tool_name,
+                            args=tool_args,
+                            output=None,
+                            error=str(e),
+                            tool_call_id=tool_call_id  # Propagate tool_call_id to result even on error
+                        ))
+                else:
+                    logger.error(f"Tool {tool_name} not found in tool registry either")
+                    results.append(ToolResult(
+                        tool=tool_name,
+                        args=tool_args,
+                        output=None,
+                        error=f"Tool {tool_name} is not available",
+                        tool_call_id=tool_call_id  # Propagate tool_call_id to result
+                    ))
+            except Exception as e:
+                logger.error(f"Error accessing tool registry: {e}", exc_info=True)
+                # Final fallback: Try direct import for known tools
+                if tool_name == "get_current_time":
+                    try:
+                        logger.info(f"Attempting direct import of {tool_name} tool")
+                        from app.agents.tools.time_tool import TimeTool
+                        time_tool = TimeTool()
+                        tool = time_tool.get_tool()
+                        result = tool.invoke(tool_args) if hasattr(tool, 'invoke') else tool(tool_args)
+                        results.append(ToolResult(
+                            tool=tool_name,
+                            args=tool_args,
+                            output=result,
+                            error="",
+                            tool_call_id=tool_call_id  # Propagate tool_call_id to result
+                        ))
+                        logger.info(f"[TOOL_EXECUTION] Tool {tool_name} executed successfully via direct import: output_preview={str(result)[:100]}...")
+                    except Exception as import_error:
+                        logger.error(f"Error with direct import of {tool_name}: {import_error}", exc_info=True)
+                        results.append(ToolResult(
+                            tool=tool_name,
+                            args=tool_args,
+                            output=None,
+                            error=f"Tool {tool_name} is not available: {str(import_error)}",
+                            tool_call_id=tool_call_id  # Propagate tool_call_id to result even on error
+                        ))
+                else:
+                    results.append(ToolResult(
+                        tool=tool_name,
+                        args=tool_args,
+                        output=None,
+                        error=f"Tool {tool_name} is not available: {str(e)}",
+                        tool_call_id=tool_call_id  # Propagate tool_call_id to result
+                    ))
     
     logger.info(f"[TOOL_EXECUTION] Completed execution: {len(results)} results returned")
     return results

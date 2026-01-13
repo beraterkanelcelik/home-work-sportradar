@@ -65,10 +65,9 @@ async def _publish_event_async(
         await redis_client.publish(channel, event_json.encode('utf-8'))
         
         event_type = event.get('type', 'unknown')
-        if event_type == "token":
-            logger.info(f"[REDIS_PUBLISH] Published token event to {channel} (event_count={event_count}): {event.get('value', '')[:30]}...")
-        else:
-            logger.info(f"[REDIS_PUBLISH] Published event type={event_type} to {channel} (event_count={event_count})")
+        # Only log non-token events for debugging (token events are too verbose)
+        if event_type != "token":
+            logger.debug(f"[REDIS_PUBLISH] Published event type={event_type} to {channel} (event_count={event_count})")
     except Exception as e:
         logger.error(f"[REDIS_PUBLISH] Error in background publish: {e}", exc_info=True)
 
@@ -188,7 +187,13 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             except Exception as e:
                 logger.warning(f"Failed to create Langfuse trace: {e}", exc_info=True)
         
+        # Check for resume_payload (from human-in-the-loop interrupt resume)
+        resume_payload = state.get("resume_payload")
+        if resume_payload:
+            logger.info(f"[HITL] [ACTIVITY_RESUME] Activity re-run with resume_payload: session={chat_id}")
+        
         # Create AgentRunner - this handles request building, trace context, etc.
+        # If resume_payload is provided, runner will use Command(resume=...) instead of AgentRequest
         runner = AgentRunner(
             user_id=state.get("user_id"),
             chat_session_id=chat_id,
@@ -199,20 +204,21 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             org_slug=state.get("org_slug"),
             org_roles=state.get("org_roles", []),
             app_roles=state.get("app_roles", []),
+            resume_payload=resume_payload,  # Pass resume_payload for interrupt resume
         )
+        
+        if resume_payload:
+            logger.info(f"[HITL] Injected resume_payload into AgentRunner: session={chat_id}")
         
         final_response = None
         event_count = [0]  # Use list for mutable closure
         publish_tasks = []  # Track publish tasks to ensure they execute
+        interrupt_data = None  # Track interrupt data for resume
         
         # Run workflow using AgentRunner.stream()
         # Publish to Redis directly in the loop (non-blocking) to ensure tasks execute properly
         async for event in runner.stream():
             event_type = event.get('type', 'unknown')
-            
-            # Log token events to verify they reach the activity loop (INFO level for debugging)
-            if event_type == "token":
-                logger.info(f"[ACTIVITY_LOOP] Received token event in activity loop (value_preview={event.get('value', '')[:30]}...)")
             
             # Check for cancellation request from Temporal
             if activity.is_cancelled():
@@ -233,17 +239,11 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                     publish_tasks.append(task)
                     # Add error callback to track task failures
                     task.add_done_callback(lambda t, et=event_type, ec=current_count: _handle_publish_task_done(t, et, ec))
-                    # Log token events to verify they're being scheduled (INFO level for debugging)
-                    if event_type == "token":
-                        logger.info(f"[REDIS_SCHEDULE] Scheduled token publish task (event_count={current_count})")
                     # Yield control to event loop to allow background tasks to execute
                     # This ensures publish tasks can run even in tight loops
                     await asyncio.sleep(0)
                 except Exception as e:
                     logger.error(f"[REDIS_PUBLISH] Failed to create publish task for {event_type} (event_count={current_count}): {e}", exc_info=True)
-            else:
-                if event_type == "token":
-                    logger.debug(f"[REDIS_PUBLISH] Redis client not available, skipping token publish")
             
             # Send heartbeat periodically (every 10 events or on important events)
             if event_count[0] % 10 == 0 or event.get("type") in ["final", "interrupt", "error"]:
@@ -254,13 +254,17 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                     "last_event_type": event.get("type"),
                 })
             
-            # Check for interrupt
+            # Check for interrupt (LangGraph native interrupt pattern)
             if event.get("type") == "interrupt":
-                logger.info(f"Workflow interrupted for chat_id={chat_id}")
+                interrupt_data = event.get("data") or event.get("interrupt")
+                logger.info(f"[HITL] [INTERRUPT] Workflow interrupted for chat_id={chat_id}, interrupt_data={interrupt_data}")
                 activity.heartbeat({"status": "interrupted", "chat_id": chat_id})
+                # Publish interrupt event to Redis for frontend
+                if redis_client:
+                    asyncio.create_task(_publish_event_async(redis_client, channel, event, event_count[0]))
                 return {
                     "status": "interrupted",
-                    "interrupt_reason": event.get("reason"),
+                    "interrupt": interrupt_data,
                 }
             
             # Capture final response (for message_saved event)
@@ -316,6 +320,8 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                 logger.debug(f"[LANGFUSE] Flushed traces for chat_id={chat_id}")
             except Exception as e:
                 logger.warning(f"Failed to flush Langfuse traces: {e}", exc_info=True)
+        
+        # Interrupt should have been handled above - if we reach here, workflow completed normally
         
         # Send final heartbeat
         activity.heartbeat({"status": "completed", "chat_id": chat_id, "event_count": event_count[0]})

@@ -61,4 +61,13 @@ you can mention that the supervisor will route them to the appropriate agent."""
             except Exception as e:
                 logger.warning(f"Failed to add RAG tool to greeter agent: {e}")
         
+        # Add time tool (requires approval)
+        try:
+            from app.agents.tools.time_tool import TimeTool
+            time_tool_instance = TimeTool()
+            tools.append(time_tool_instance.get_tool())
+            logger.debug("Added time tool to greeter agent")
+        except Exception as e:
+            logger.warning(f"Failed to add time tool to greeter agent: {e}")
+        
         return tools

@@ -152,12 +152,12 @@ export default function ServiceStatus() {
 
   const getOverallStatusIcon = () => {
     if (healthStatus.status === 'checking' || isRefreshing) {
-      return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      return <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
     }
     if (healthStatus.status === 'healthy') {
-      return <CheckCircle2 className="h-4 w-4 text-green-500" />
+      return <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
     }
-    return <XCircle className="h-4 w-4 text-red-500" />
+    return <XCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
   }
 
   const getOverallStatusText = () => {
@@ -167,7 +167,7 @@ export default function ServiceStatus() {
     if (healthStatus.status === 'healthy') {
       return 'All Systems Operational'
     }
-    return 'Service Issues Detected'
+    return 'Issues Detected'
   }
 
   const getServiceStatusIcon = (status: string) => {
@@ -231,26 +231,23 @@ export default function ServiceStatus() {
       <button
         onClick={() => setDropdownOpen(!dropdownOpen)}
         className={cn(
-          "flex items-center gap-2 px-3 py-2 rounded-md",
-          "hover:bg-accent transition-colors",
-          "border border-border",
-          "text-sm font-medium"
+          "flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-full",
+          "hover:opacity-90 transition-all duration-200",
+          "border",
+          healthStatus.status === 'healthy' && !isRefreshing 
+            ? "bg-green-500/10 border-green-500/30 hover:bg-green-500/15 backdrop-blur-sm" 
+            : healthStatus.status === 'unhealthy' && !isRefreshing
+            ? "bg-red-500/10 border-red-500/20 hover:bg-red-500/15"
+            : "bg-muted/50 border-border hover:bg-muted",
+          "shadow-sm hover:shadow-md",
+          "min-w-[36px]"
         )}
-        title="View service status"
+        title={getOverallStatusText()}
       >
-        <div className="flex items-center gap-2">
-          {getOverallStatusIcon()}
-          <span className={cn(
-            healthStatus.status === 'healthy' && !isRefreshing ? 'text-green-500' : '',
-            healthStatus.status === 'unhealthy' && !isRefreshing ? 'text-red-500' : '',
-            (healthStatus.status === 'checking' || isRefreshing) && 'text-muted-foreground'
-          )}>
-            {getOverallStatusText()}
-          </span>
-        </div>
+        {getOverallStatusIcon()}
         <ChevronDown 
           className={cn(
-            "h-3.5 w-3.5 text-muted-foreground transition-transform",
+            "h-3.5 w-3.5 text-muted-foreground transition-transform duration-200",
             dropdownOpen && "rotate-180"
           )} 
         />

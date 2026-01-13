@@ -60,4 +60,13 @@ Be thorough in your searches and provide comprehensive answers based on the retr
             except Exception as e:
                 logger.warning(f"Failed to add RAG tool to search agent: {e}")
         
+        # Add time tool (requires approval)
+        try:
+            from app.agents.tools.time_tool import TimeTool
+            time_tool_instance = TimeTool()
+            tools.append(time_tool_instance.get_tool())
+            logger.debug("Added time tool to search agent")
+        except Exception as e:
+            logger.warning(f"Failed to add time tool to search agent: {e}")
+        
         return tools

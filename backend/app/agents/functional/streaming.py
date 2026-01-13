@@ -75,18 +75,15 @@ class EventCallbackHandler(BaseCallbackHandler):
         """Capture LLM token chunks, but skip supervisor routing tokens."""
         # Skip tokens from supervisor LLM
         if self.is_supervisor_llm:
-            logger.debug(f"[TOKEN_CALLBACK] Skipping supervisor token: {token[:20]}...")
             return
         
         # Additional validation: supervisor only outputs short agent names
         token_lower = token.strip().lower()
         if len(token_lower) <= 10 and token_lower in self.agent_names:
             if self.supervisor_in_stack or (self.current_chain and "supervisor" in str(self.current_chain).lower()):
-                logger.debug(f"[TOKEN_CALLBACK] Skipping agent name token: {token}")
                 return
             for chain in self.chain_stack:
                 if chain and "supervisor" in str(chain).lower():
-                    logger.debug(f"[TOKEN_CALLBACK] Skipping supervisor chain token: {token}")
                     return
         
         # Check chain context as fallback
@@ -100,7 +97,6 @@ class EventCallbackHandler(BaseCallbackHandler):
                     break
         
         if should_skip:
-            logger.debug(f"[TOKEN_CALLBACK] Skipping token due to supervisor context: {token[:20]}...")
             return
         
         if token:
@@ -110,7 +106,6 @@ class EventCallbackHandler(BaseCallbackHandler):
                     "type": "token",
                     "value": token
                 })
-                logger.debug(f"[TOKEN_CALLBACK] Queued token: {token[:30]}... (queue_size={self.event_queue.qsize()})")
             except Exception as e:
                 logger.error(f"[TOKEN_CALLBACK] Error queuing token: {e}", exc_info=True)
     

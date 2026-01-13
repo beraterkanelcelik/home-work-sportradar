@@ -76,7 +76,8 @@ Agent Playground provides all of this out of the box, with a beautiful UI, compr
 - **Streaming Support**: Real-time token streaming with SSE, plus live task status updates
 
 ### 📡 Real-Time Streaming & Status Updates
-- **Token Streaming**: Real-time LLM token delivery via Server-Sent Events (SSE)
+- **Temporal-Redis Architecture**: Durable workflows with real-time event streaming
+- **Token Streaming**: Real-time LLM token delivery via Redis pub/sub → SSE
 - **Task Status Updates**: Live visibility into workflow progress:
   - "Loading conversation history..."
   - "Routing to agent..."
@@ -86,6 +87,7 @@ Agent Playground provides all of this out of the box, with a beautiful UI, compr
 - **Tool Execution Visibility**: See tools being executed in real-time with status transitions
 - **Ephemeral UI State**: Status messages are ephemeral (not persisted) for clean, real-time feedback
 - **Stream Completion Tracking**: Tool items and final results appear only after stream completes
+- **Durable Workflows**: Long-running workflows per session survive restarts and handle multiple messages
 
 ### 📊 Full Observability (Langfuse v3)
 - **Complete Tracing**: Track every LLM call, tool invocation, and agent decision with full context
@@ -159,8 +161,11 @@ Agent Playground provides all of this out of the box, with a beautiful UI, compr
 ### Infrastructure
 - **Docker & Docker Compose**: Containerized deployment
 - **Nginx**: Reverse proxy (optional)
+- **Temporal Server**: Durable workflow orchestration (included in compose)
+- **Temporal Worker**: Processes workflow tasks and activities
+- **Uvicorn**: ASGI server for Django (replaces WSGI `runserver`)
 - **Langfuse Server**: Self-hosted observability (included in compose)
-- **Redis**: Caching and queue management (for Langfuse)
+- **Redis**: Pub/sub for real-time event streaming + caching/queues
 - **ClickHouse**: Analytics database (for Langfuse)
 - **MinIO**: S3-compatible object storage (for Langfuse)
 
@@ -294,13 +299,38 @@ Alternatively, install `make` via:
 └──────────────────────┬──────────────────────────────────────┘
                        │ HTTP/SSE (Real-time Streaming)
 ┌──────────────────────┴──────────────────────────────────────┐
-│              Django REST API (Backend)                       │
+│         Django ASGI Backend (Uvicorn)                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │   Auth API   │  │   Chat API   │  │  Agent API   │      │
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐  │
+│  │         Streaming Endpoint (SSE)                     │  │
+│  │  • Subscribes to Redis pub/sub channels              │  │
+│  │  • Manages Temporal workflow lifecycle               │  │
+│  │  • Streams events to frontend via SSE                │  │
+│  └──────────────────────┬───────────────────────────────┘  │
+│                         │ Redis Pub/Sub                     │
+│  ┌──────────────────────┴───────────────────────────────┐  │
+│  │              Temporal Worker                          │  │
+│  │  ┌──────────────────────────────────────────────┐   │  │
+│  │  │  ChatWorkflow (Long-running per session)     │   │  │
+│  │  │  • Signal-based message processing            │   │  │
+│  │  │  • Inactivity timeout (5 minutes)             │   │  │
+│  │  │  • Message deduplication                      │   │  │
+│  │  └──────────────┬───────────────────────────────┘   │  │
+│  │                 │ Executes Activity                  │  │
+│  │  ┌──────────────┴───────────────────────────────┐   │  │
+│  │  │  run_chat_activity                            │   │  │
+│  │  │  • Runs AgentRunner (LangGraph workflow)      │   │  │
+│  │  │  • Publishes events to Redis (fire-and-forget)│   │  │
+│  │  │  • Handles agent execution & tool calls        │   │  │
+│  │  └───────────────────────────────────────────────┘   │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
 │  │    LangGraph Functional API (@entrypoint workflow)    │  │
+│  │  (Executed within Temporal Activity via AgentRunner)  │  │
 │  │                                                       │  │
 │  │  @entrypoint → ai_agent_workflow                     │  │
 │  │       │                                              │  │
@@ -313,7 +343,7 @@ Alternatively, install `make` via:
 │  │       ├─→ @task agent_with_tool_results_task        │  │
 │  │       └─→ @task save_message_task                    │  │
 │  │                                                       │  │
-│  │  Streaming: BaseCallbackHandler → SSE Events         │  │
+│  │  Events: BaseCallbackHandler → Redis Pub/Sub         │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
@@ -325,14 +355,84 @@ Alternatively, install `make` via:
 ┌──────────────────────┴──────────────────────────────────────┐
 │                    Infrastructure Layer                       │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │PostgreSQL│  │  Redis   │  │ClickHouse│  │  MinIO   │    │
-│  │+pgvector │  │          │  │          │  │          │    │
-│  │(Checkpoint)│ │          │  │          │  │          │    │
+│  │PostgreSQL│  │  Redis   │  │ Temporal │  │ClickHouse│    │
+│  │+pgvector │  │ Pub/Sub  │  │ Server   │  │          │    │
+│  │(Checkpoint)│ │(Streaming)│ │(Workflows)│ │          │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
+│  ┌──────────┐                                               │
+│  │  MinIO   │                                               │
+│  │          │                                               │
+│  └──────────┘                                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Data Flow
+
+**Streaming Request Flow:**
+```
+User Message → Django ASGI View (stream_agent)
+    ↓
+Get/Create Temporal Workflow (signal_with_start)
+    ↓
+Send new_message signal to workflow
+    ↓
+Temporal Workflow processes signal → Executes Activity
+    ↓
+Activity runs AgentRunner → LangGraph workflow executes
+    ↓
+Events published to Redis pub/sub (fire-and-forget)
+    ↓
+Django SSE endpoint subscribes to Redis channel
+    ↓
+Events streamed to frontend via SSE
+```
+
+**Non-Streaming Request Flow:**
+```
+User Message → Django View (run_agent)
+    ↓
+Direct execution via AgentRunner
+    ↓
+Returns final response (no streaming)
+```
+
 ### Backend Architecture
+
+#### Temporal-Redis Workflow Architecture
+
+The system uses **Temporal workflows** for durable, long-running chat sessions with **Redis pub/sub** for real-time event streaming. This architecture provides:
+
+- **Durability**: Workflows persist state and survive restarts
+- **Real-time Streaming**: Redis pub/sub provides low-latency event delivery
+- **Separation of Concerns**: Streaming (Temporal+Redis) vs. non-streaming (direct) operations
+- **Event Loop Isolation**: Per-loop resource management prevents async conflicts
+
+**Key Components:**
+
+1. **Temporal Workflows** (`app/agents/temporal/workflow.py`):
+   - `ChatWorkflow`: Long-running workflow per chat session
+   - Signal-based message processing (`new_message` signal)
+   - Inactivity timeout (5 minutes)
+   - Message deduplication via content hashing
+   - Automatic workflow lifecycle management
+
+2. **Temporal Activities** (`app/agents/temporal/activity.py`):
+   - `run_chat_activity`: Executes agent logic via `AgentRunner`
+   - Publishes events to Redis pub/sub (fire-and-forget)
+   - Activity heartbeating for long-running operations
+   - Error handling and progress tracking
+
+3. **Redis Pub/Sub** (`app/core/redis.py`):
+   - Per-event-loop client management (prevents "Future attached to different loop" errors)
+   - Channel naming: `chat:{tenant_id}:{session_id}`
+   - Automatic cleanup with `WeakKeyDictionary`
+   - Thread-safe connection pool management
+
+4. **Django ASGI Backend** (`app/api/agent.py`):
+   - Async views for SSE streaming
+   - Redis subscription for real-time events
+   - Temporal workflow coordination
+   - Uvicorn ASGI server (replaces WSGI `runserver`)
 
 #### Agent System - Functional API (`app/agents/`)
 
@@ -340,23 +440,29 @@ Alternatively, install `make` via:
 
 ```
 agents/
-├── functional/           # Functional API implementation
-│   ├── workflow.py      # @entrypoint ai_agent_workflow
-│   ├── tasks.py         # @task functions (supervisor, agents, tools)
-│   ├── models.py        # Pydantic models (AgentRequest, AgentResponse)
-│   └── middleware.py    # LangChain middleware setup
-├── agents/              # Agent implementations (used by tasks)
+├── temporal/            # Temporal workflow integration
+│   ├── workflow.py     # ChatWorkflow (long-running per session)
+│   ├── activity.py     # run_chat_activity (executes agents)
+│   ├── workflow_manager.py  # Workflow lifecycle management
+│   └── worker.py       # Temporal worker process
+├── functional/         # Functional API implementation
+│   ├── workflow.py     # @entrypoint ai_agent_workflow
+│   ├── tasks.py        # @task functions (supervisor, agents, tools)
+│   ├── models.py       # Pydantic models (AgentRequest, AgentResponse)
+│   ├── streaming.py    # EventCallbackHandler for token streaming
+│   └── middleware.py   # LangChain middleware setup
+├── agents/             # Agent implementations (used by tasks)
 │   ├── base.py         # BaseAgent abstract class
 │   ├── supervisor.py   # Routing agent
 │   ├── greeter.py      # Welcome agent
 │   └── search.py       # RAG-powered search agent
-├── tools/               # Agent tools
+├── tools/              # Agent tools
 │   ├── base.py         # BaseTool interface
 │   ├── registry.py     # Tool registration system
 │   └── rag_tool.py     # RAG retrieval tool (IMPLEMENTED)
-├── checkpoint.py        # PostgreSQL checkpoint adapter
-├── config.py            # Agent configuration
-└── runner.py            # Workflow execution & streaming
+├── checkpoint.py       # PostgreSQL checkpoint adapter
+├── config.py           # Agent configuration
+└── runner.py           # AgentRunner (workflow execution & streaming)
 ```
 
 **Key Components:**
@@ -370,8 +476,9 @@ agents/
   - `save_message_task` - Persistence
 - **Pydantic Models**: Type-safe request/response with validation
 - **PostgreSQL Checkpoints**: Persistent state via `PostgresSaver` with connection resilience
-- **Streaming**: Real-time token streaming via `BaseCallbackHandler` with SSE
+- **Streaming**: Real-time token streaming via `BaseCallbackHandler` → Redis pub/sub → SSE
 - **Task Composition**: Tasks naturally compose - output of one becomes input to next
+- **AgentRunner**: Centralizes agent execution for both streaming and non-streaming modes
 
 #### Observability (`app/observability/`)
 - **Langfuse v3 SDK**: OpenTelemetry-based tracing
@@ -526,16 +633,31 @@ When a user sends "What is Madde 10 according to docs?":
 
 All tasks are traced in Langfuse, and status updates are streamed to the frontend in real-time.
 
-### Streaming with Functional API
+### Streaming with Temporal-Redis Architecture
 
-Unlike `astream_events()` (which requires async checkpoints), we use:
+The system uses a **Temporal-Redis workflow architecture** for durable, real-time streaming:
 
-- **`stream()` method**: Works with sync `PostgresSaver`
-- **`BaseCallbackHandler`**: Captures LLM tokens via `on_llm_new_token`
-- **Task Status**: Captures task start/end via `on_chain_start` / `on_chain_end`
-- **Tool Status**: Captures tool execution via `on_tool_start` / `on_tool_end`
+- **Temporal Workflows**: Long-running workflows per chat session handle multiple messages
+- **Temporal Activities**: Execute agent logic via `AgentRunner` and publish events to Redis
+- **Redis Pub/Sub**: Real-time event streaming between Temporal activities and Django SSE endpoints
+- **Per-Loop Client Management**: Redis clients are managed per event loop to prevent async conflicts
+- **AgentRunner**: Centralizes agent execution for both streaming (Temporal) and non-streaming (direct) modes
+- **Event Flow**: `BaseCallbackHandler` → Redis pub/sub → SSE stream → Frontend
 
-This provides real-time streaming while maintaining compatibility with PostgreSQL checkpoints.
+**Streaming Path:**
+```
+AgentRunner.stream() → EventCallbackHandler → Redis pub/sub → Django SSE → Frontend
+```
+
+**Non-Streaming Path:**
+```
+AgentRunner.run() → Returns final AgentResponse
+```
+
+This architecture provides:
+- **Durability**: Workflows persist state and survive restarts
+- **Real-time**: Low-latency event streaming via Redis
+- **Separation**: Clean separation between streaming and non-streaming operations
 
 ### Error Handling & Resilience
 
@@ -997,9 +1119,12 @@ Let's walk through a complete example of how the system handles a user query:
 - Includes tool_calls, agent_name, token_usage
 - **Status Update**: "Saving message..." → "Saved message"
 
-**Step 3: Streaming to Frontend**
+**Step 4: Event Streaming via Redis**
 
-Throughout execution, events are streamed via SSE:
+Throughout execution, events are published to Redis pub/sub:
+- Activity publishes events to channel: `chat:{user_id}:{session_id}`
+- Django SSE endpoint subscribes to same channel
+- Events streamed to frontend via SSE:
 
 ```
 event: update
@@ -1114,10 +1239,12 @@ MODEL_PRICING = {
 
 ### Concurrent Request Handling
 
-- **Django ASGI**: Uses ASGI for async request handling
-- **Background Threading**: Streaming runs in background threads to avoid blocking
+- **Django ASGI**: Uses Uvicorn (ASGI) for async request handling and async generators
+- **Temporal Workflows**: Long-running workflows handle multiple messages per session
+- **Redis Pub/Sub**: Efficient event streaming with per-loop client isolation
 - **Database Connection Pooling**: Efficient connection management for concurrent requests
-- **State Isolation**: Each request has isolated state, preventing cross-contamination
+- **State Isolation**: Each session has isolated workflow state, preventing cross-contamination
+- **Event Loop Management**: Per-loop Redis clients prevent "Future attached to different loop" errors
 
 ### Resource Usage
 
@@ -1163,6 +1290,7 @@ docker-compose exec backend coverage report
 ### Project Documentation
 - [Langfuse Integration Guide](./docs/LANGFUSE_INTEGRATION_GUIDE.md) - Comprehensive guide to Langfuse setup and usage
 - [LangGraph Functional API Lessons Learned](./docs/LANGGRAPH_FUNCTIONAL_API_LESSONS_LEARNED.md) - Deep technical dive into Functional API implementation, patterns, pitfalls, and best practices
+- [Temporal-Redis Workflow Lessons Learned](./docs/TEMPORAL_REDIS_WORKFLOW_LESSONS_LEARNED.md) - Comprehensive guide to Temporal workflow architecture, Redis pub/sub streaming, ASGI migration, event loop management, and architectural decisions
 
 ### External Documentation
 - [Django Documentation](https://docs.djangoproject.com/)
@@ -1180,6 +1308,9 @@ docker-compose exec backend coverage report
 Agent Playground is designed to be a comprehensive platform for AI agent development. Current focus areas:
 
 ### ✅ Implemented
+- **Temporal Workflow Architecture**: ✅ **COMPLETE** - Long-running workflows per chat session with signal-based processing
+- **Redis Pub/Sub Streaming**: ✅ **COMPLETE** - Real-time event streaming via Redis pub/sub with per-loop client management
+- **ASGI Migration**: ✅ **COMPLETE** - Django backend running on Uvicorn (ASGI) for async views and streaming
 - **LangGraph Functional API**: Complete implementation with `@entrypoint` and `@task` decorators
 - **Multi-agent system**: Supervisor pattern with task-based architecture
 - **Full observability**: Langfuse v3 integration with complete tracing
@@ -1191,7 +1322,7 @@ Agent Playground is designed to be a comprehensive platform for AI agent develop
   - Accurate token counting with tiktoken
 - **RAG Tool Integration**: ✅ **COMPLETE** - `rag_retrieval_tool` fully implemented and working
 - **Search Agent**: ✅ **COMPLETE** - RAG-powered search agent that uses documents
-- **Real-time Streaming**: Token streaming with live status updates
+- **Real-time Streaming**: Token streaming with live status updates via Temporal+Redis
 - **Type-Safe Architecture**: Pydantic models throughout
 - **Multi-tenant architecture**: Complete user isolation
 - **Production-ready API and frontend**: Battle-tested and deployed

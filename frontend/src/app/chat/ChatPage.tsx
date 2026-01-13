@@ -1,4 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+/**
+ * ChatPage Component
+ * 
+ * Implements human-in-the-loop tool approval aligned with LangGraph best practices.
+ * Reference: https://docs.langchain.com/oss/python/langgraph/use-functional-api#review-tool-calls
+ * 
+ * Architecture:
+ * - Uses Temporal workflows for durability (equivalent to LangGraph's checkpointing)
+ * - Uses Redis for real-time streaming (equivalent to LangGraph's streaming)
+ * - Custom HITL mechanism bridges Temporal signals with LangGraph's tool approval flow
+ * 
+ * The review pattern follows LangGraph's interrupt() -> Command() flow:
+ * 1. Tool requires approval -> Workflow pauses (interrupt equivalent)
+ * 2. Frontend shows review UI with tool details
+ * 3. User approves -> Sends signal (Command equivalent)
+ * 4. Workflow resumes with approved tool result
+ */
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useChatStore, type Message } from '@/state/useChatStore'
 import { useAuthStore } from '@/state/useAuthStore'
@@ -183,7 +200,6 @@ export default function ChatPage() {
       tokens_used: 0,
       created_at: new Date().toISOString(),
     }
-    console.log(`[FRONTEND] Created temporary user message temp_id=${tempUserMessageId} session=${currentSession.id} content_preview=${content.substring(0, 50)}...`)
     set((state: { messages: Message[] }) => ({
       messages: [...state.messages, userMessage],
     }))
@@ -205,7 +221,6 @@ export default function ChatPage() {
         
         // Create streaming message placeholder
         const assistantMessageId = Date.now() + 1
-        console.log(`[FRONTEND] Created temporary assistant message temp_id=${assistantMessageId} session=${currentSession.id}`)
         setWaitingForResponse(true)
         setWaitingMessageId(assistantMessageId)
         // Reset stream complete flag for this new message
@@ -236,15 +251,22 @@ export default function ChatPage() {
         const streamStartTime = Date.now()
         const eventTypeCounts: Record<string, number> = {}
         
-        console.log(`[FRONTEND] Starting stream for session=${currentSession.id} message_preview=${content.substring(0, 50)}...`)
+        console.log(`[FRONTEND] [STREAM_START] Starting agent stream session=${currentSession.id} message_preview=${content.substring(0, 50)}...`)
         
         const stream = createAgentStream(
           currentSession.id,
           content,
           token,
           (event: StreamEvent) => {
-            const eventType = event.type as string
+            const eventType = event.type
             eventTypeCounts[eventType] = (eventTypeCounts[eventType] || 0) + 1
+            
+            // Log critical human-in-the-loop events (aligned with LangGraph interrupt pattern)
+            // Reference: https://docs.langchain.com/oss/python/langgraph/use-functional-api#review-tool-calls
+            // This is the equivalent of LangGraph's interrupt() in our Temporal + Redis architecture
+            if (eventType === 'update' && event.data?.type === 'tool_approval_required') {
+              console.log(`[HITL] [REVIEW] Stream event: tool_approval_required (interrupt equivalent) session=${currentSession.id}`, event.data)
+            }
             
             // Handle message_saved event to update temporary IDs with real DB IDs
             if (eventType === 'message_saved') {
@@ -254,18 +276,14 @@ export default function ChatPage() {
               const sessionId = savedData.session_id
               
               if (sessionId === currentSession.id && dbId) {
-                console.log(`[FRONTEND] Updating temporary message with db_id=${dbId} role=${role} session=${sessionId}`)
-                
                 set((state: { messages: Message[] }) => {
                   // Find temporary message by role and update its ID
                   // For user messages, find the most recent user message with a temporary ID
                   // For assistant messages, find the message with the temporary assistantMessageId
                   const updatedMessages = state.messages.map((msg: Message) => {
                     if (role === 'user' && msg.role === 'user' && msg.id === tempUserMessageId) {
-                      console.log(`[FRONTEND] Updating user message temp_id=${tempUserMessageId} -> db_id=${dbId}`)
                       return { ...msg, id: dbId }
                     } else if (role === 'assistant' && msg.role === 'assistant' && msg.id === assistantMessageId) {
-                      console.log(`[FRONTEND] Updating assistant message temp_id=${assistantMessageId} -> db_id=${dbId}`)
                       return { ...msg, id: dbId }
                     }
                     return msg
@@ -279,12 +297,16 @@ export default function ChatPage() {
             
             if (eventType === 'token') {
               tokenBatchCount++
-              const now = Date.now()
-              // Log token batches every 10 tokens or every 500ms, whichever comes first
-              if (tokenBatchCount % 10 === 0 || (now - lastTokenLogTime) > 500) {
-                console.log(`[FRONTEND] Processing tokens: batch=${tokenBatchCount} session=${currentSession.id}`)
-                lastTokenLogTime = now
+              
+              // Log first token and periodic token batches
+              if (tokenBatchCount === 1) {
+                const timeToFirstToken = Date.now() - streamStartTime
+                console.log(`[FRONTEND] [STREAM] First token received session=${currentSession.id} time_to_first_token=${timeToFirstToken}ms`)
+              } else if (tokenBatchCount % 50 === 0) {
+                const elapsed = Date.now() - streamStartTime
+                console.log(`[FRONTEND] [STREAM] Token batch: ${tokenBatchCount} tokens received session=${currentSession.id} elapsed=${elapsed}ms`)
               }
+              
               // First token received, hide loading indicator
               setWaitingForResponse(false)
               setWaitingMessageId(null)
@@ -317,8 +339,95 @@ export default function ChatPage() {
             } else if (eventType === 'update') {
               // Handle workflow state updates (agent_name, tool_calls, plan_proposal, status, etc.)
               const updateData = event.data || {}
-              console.log(`[FRONTEND] Received update event session=${currentSession.id} task=${updateData.task || 'none'} status=${updateData.status || 'none'}`)
               
+              // Log update events with key information
+              if (updateData.agent_name) {
+                console.log(`[FRONTEND] [UPDATE] Agent name updated: agent=${updateData.agent_name} session=${currentSession.id}`)
+              }
+              if (updateData.tool_calls && Array.isArray(updateData.tool_calls)) {
+                const toolCallCount = updateData.tool_calls.length
+                const pendingCount = updateData.tool_calls.filter((tc: any) => tc.status === 'pending').length
+                console.log(`[FRONTEND] [UPDATE] Tool calls updated: total=${toolCallCount} pending=${pendingCount} session=${currentSession.id}`)
+              }
+              
+              // Human-in-the-Loop Tool Review (aligned with LangGraph best practices)
+              // Reference: https://docs.langchain.com/oss/python/langgraph/use-functional-api#review-tool-calls
+              // This handles the "interrupt" equivalent in our Temporal + Redis architecture
+              // When a tool requires approval, the workflow pauses and waits for human review
+              if (updateData.type === 'tool_approval_required' && updateData.tool_info) {
+                const toolInfo = updateData.tool_info
+                console.log(`[HITL] [REVIEW] Received tool_approval_required event (interrupt equivalent): tool=${toolInfo.tool} tool_call_id=${toolInfo.tool_call_id} session=${currentSession?.id} args=`, toolInfo.args)
+                
+                // Update the assistant message to mark the tool as pending
+                set((state: { messages: Message[] }) => {
+                  const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+                  if (!currentMessage) {
+                    console.warn(`[HITL] Could not find assistant message with id=${assistantMessageId} for tool_approval_required event`)
+                    return state
+                  }
+                  
+                  const existingToolCalls = currentMessage.metadata?.tool_calls || []
+                  const toolCallExists = existingToolCalls.some((tc: any) => 
+                    (tc.id === toolInfo.tool_call_id) || 
+                    (tc.name === toolInfo.tool || tc.tool === toolInfo.tool)
+                  )
+                  
+                  if (!toolCallExists) {
+                    // Add new tool call with pending status
+                    console.log(`[HITL] Adding new pending tool call to message: tool=${toolInfo.tool} tool_call_id=${toolInfo.tool_call_id}`)
+                    const newToolCall = {
+                      id: toolInfo.tool_call_id,
+                      name: toolInfo.tool,
+                      tool: toolInfo.tool,
+                      args: toolInfo.args || {},
+                      status: 'pending',
+                      requires_approval: true
+                    }
+                    
+                    return {
+                      messages: state.messages.map((msg: Message) =>
+                        msg.id === assistantMessageId
+                          ? {
+                              ...msg,
+                              metadata: {
+                                ...msg.metadata,
+                                tool_calls: [...existingToolCalls, newToolCall]
+                              }
+                            }
+                          : msg
+                      ),
+                    }
+                  } else {
+                    // Update existing tool call to pending (for review - aligned with LangGraph pattern)
+                    console.log(`[HITL] [REVIEW] Updating existing tool call to pending for review: tool=${toolInfo.tool} tool_call_id=${toolInfo.tool_call_id}`)
+                    return {
+                      messages: state.messages.map((msg: Message) =>
+                        msg.id === assistantMessageId
+                          ? {
+                              ...msg,
+                              metadata: {
+                                ...msg.metadata,
+                                tool_calls: existingToolCalls.map((tc: any) => {
+                                  if ((tc.id === toolInfo.tool_call_id) || 
+                                      (tc.name === toolInfo.tool || tc.tool === toolInfo.tool)) {
+                                    return {
+                                      ...tc,
+                                      id: toolInfo.tool_call_id,
+                                      status: 'pending',
+                                      requires_approval: true
+                                    }
+                                  }
+                                  return tc
+                                })
+                              }
+                            }
+                          : msg
+                      ),
+                    }
+                  }
+                })
+              }
+
               // Handle task status updates - create/update system status messages in real-time
               if (updateData.task && updateData.status) {
                 set((state: { messages: Message[] }) => {
@@ -332,7 +441,6 @@ export default function ChatPage() {
                   
                   if (existingStatusMsg) {
                     // Update existing status message (present -> past tense)
-                    console.log(`[Status Update] Updating task ${updateData.task}: "${existingStatusMsg.content}" -> "${updateData.status}" (completed: ${updateData.is_completed})`)
                     return {
                       messages: state.messages.map((msg: Message) =>
                         msg.id === existingStatusMsg.id
@@ -395,6 +503,10 @@ export default function ChatPage() {
                 if (updateData.tool_calls) {
                   // Direct tool_calls array update - this comes after stream completes
                   // This is when we show the tool items
+                  const pendingTools = (updateData.tool_calls || []).filter((tc: any) => tc.status === 'pending' && tc.requires_approval)
+                  if (pendingTools.length > 0) {
+                    console.log(`[HITL] Received tool_calls with ${pendingTools.length} pending tools requiring approval:`, pendingTools.map((tc: any) => ({ tool: tc.name || tc.tool, tool_call_id: tc.id, status: tc.status })))
+                  }
                   updatedMetadata.tool_calls = updateData.tool_calls
                 } else if (updateData.tool && updateData.status) {
                   // During streaming, track tool status updates (Executing -> Executed)
@@ -435,11 +547,6 @@ export default function ChatPage() {
               // tool_calls are sent via update event (before done event), we just mark stream as complete
               const doneData = event.data || {}
               const duration = Date.now() - streamStartTime
-              const eventSummary = Object.entries(eventTypeCounts)
-                .map(([type, count]) => `${type}=${count}`)
-                .join(', ')
-              console.log(`[FRONTEND] Stream completed session=${currentSession.id} duration=${duration}ms tokens=${tokenBatchCount} events={${eventSummary}}`)
-              
               // Mark stream as complete for this message - tool items can now be shown
               // tool_calls should already be set via update event, we just need to show them
               if (assistantMessageId) {
@@ -505,6 +612,145 @@ export default function ChatPage() {
               setSending(false)
               setWaitingForResponse(false)
               setWaitingMessageId(null)
+            } else if (eventType === 'interrupt') {
+              // LangGraph native interrupt pattern - workflow paused for approval
+              // Connection remains open but with shorter timeout (5 min) for scalability
+              // This balances resource usage with UX (no reconnection needed)
+              console.log(`[HITL] [INTERRUPT] Workflow interrupted - connection will timeout after 5 minutes if no resume session=${currentSession.id}`)
+              
+              // Extract interrupt payload - handle multiple formats from backend
+              const interruptData = event.data || event.interrupt
+              let interruptValue: any = null
+              
+              // Handle different interrupt data formats:
+              // 1. Array format: [{value: {...}, resumable: true, ns: [...]}]
+              // 2. Tuple format: (Interrupt(value={...}, id='...'),) - Python tuple serialized
+              // 3. Direct Interrupt object: {value: {...}, id: '...'}
+              if (interruptData) {
+                if (Array.isArray(interruptData) && interruptData.length > 0) {
+                  // Array format - extract value from first element
+                  const firstItem = interruptData[0]
+                  if (firstItem?.value) {
+                    interruptValue = firstItem.value
+                  } else if (firstItem?.type === 'tool_approval') {
+                    // Direct value in array
+                    interruptValue = firstItem
+                  }
+                } else if (typeof interruptData === 'object') {
+                  // Direct object - could be Interrupt object with .value or direct payload
+                  if (interruptData.value) {
+                    interruptValue = interruptData.value
+                  } else if (interruptData.type === 'tool_approval') {
+                    interruptValue = interruptData
+                  }
+                }
+              }
+              
+              if (interruptValue && interruptValue.type === 'tool_approval') {
+                const tools = interruptValue.tools || []
+                console.log(`[HITL] [INTERRUPT] Received interrupt with ${tools.length} tools requiring approval:`, tools.map((t: any) => ({ tool: t.tool, tool_call_id: t.tool_call_id })))
+                
+                // Mark message as ready to show tool calls (even though stream isn't complete)
+                // This ensures the approval UI is visible immediately
+                setStreamComplete(prev => new Set(prev).add(assistantMessageId))
+                
+                // Ensure assistant message exists - create it if it doesn't
+                set((state: { messages: Message[] }) => {
+                  let currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+                  
+                  // Create assistant message if it doesn't exist
+                  if (!currentMessage) {
+                    console.log(`[HITL] [INTERRUPT] Creating assistant message for interrupt: session=${currentSession.id}`)
+                    const newMessage: Message = {
+                      id: assistantMessageId,
+                      role: 'assistant',
+                      content: '',
+                      tokens_used: 0,
+                      created_at: new Date().toISOString(),
+                      metadata: {
+                        agent_name: 'assistant',
+                        tool_calls: []
+                      }
+                    }
+                    return {
+                      messages: [...state.messages, newMessage]
+                    }
+                  }
+                  
+                  // Update existing message with tool calls requiring approval
+                  const existingToolCalls = currentMessage.metadata?.tool_calls || []
+                  const updatedToolCalls = [...existingToolCalls]
+                  
+                  // Add or update tool calls from interrupt
+                  for (const toolInfo of tools) {
+                    const existingIndex = updatedToolCalls.findIndex((tc: any) => 
+                      tc.id === toolInfo.tool_call_id || 
+                      (tc.name === toolInfo.tool || tc.tool === toolInfo.tool)
+                    )
+                    
+                    const toolCallData = {
+                      id: toolInfo.tool_call_id,
+                      name: toolInfo.tool,
+                      tool: toolInfo.tool,
+                      args: toolInfo.args || {},
+                      status: 'pending' as const,
+                      requires_approval: true
+                    }
+                    
+                    if (existingIndex >= 0) {
+                      updatedToolCalls[existingIndex] = { ...updatedToolCalls[existingIndex], ...toolCallData }
+                    } else {
+                      updatedToolCalls.push(toolCallData)
+                    }
+                  }
+                  
+                  return {
+                    messages: state.messages.map((msg: Message) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            metadata: {
+                              ...msg.metadata,
+                              tool_calls: updatedToolCalls
+                            }
+                          }
+                        : msg
+                    ),
+                  }
+                })
+              } else {
+                console.warn(`[HITL] [INTERRUPT] Could not parse interrupt data:`, interruptData)
+              }
+              
+              // Don't set sending=false here - we're waiting for resume
+              // Connection stays open to receive final response after resume
+            } else if (eventType === 'heartbeat') {
+              // Heartbeat event to keep connection alive (scalability best practice)
+              // Prevents idle connection timeouts
+              // Log periodically to track connection health
+              const elapsed = Date.now() - streamStartTime
+              if (elapsed % 60000 < 1000) { // Log roughly every minute
+                console.log(`[FRONTEND] [HEARTBEAT] Connection alive session=${currentSession.id} elapsed=${Math.floor(elapsed / 1000)}s`)
+              }
+            } else if (eventType === 'final') {
+              // Final event contains the complete response after approval
+              const finalData = event.data || event.response || {}
+              const duration = Date.now() - streamStartTime
+              console.log(`[FRONTEND] [STREAM] Final event received session=${currentSession.id} duration=${duration}ms has_response=${!!finalData.reply} response_length=${finalData.reply?.length || 0}`)
+              
+              // Update message with final response if present
+              if (finalData.reply && assistantMessageId) {
+                set((state: { messages: Message[] }) => ({
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? { ...msg, content: finalData.reply }
+                      : msg
+                  ),
+                }))
+              }
+            } else if (eventType === 'agent_start') {
+              const agentData = event.data || {}
+              console.log(`[FRONTEND] [STREAM] Agent started: agent=${agentData.agent_name || 'unknown'} session=${currentSession.id}`)
             } else {
               // Handle unknown event types gracefully
               console.debug(`[FRONTEND] Unknown event type received session=${currentSession.id} type=${eventType}`, event)
@@ -512,7 +758,7 @@ export default function ChatPage() {
           },
           (error: Error) => {
             const duration = Date.now() - streamStartTime
-            console.error(`[FRONTEND] Stream connection error session=${currentSession.id} duration=${duration}ms error=${error.message}`)
+            console.error(`[FRONTEND] [STREAM_ERROR] Stream connection error session=${currentSession.id} duration=${duration}ms error=${error.message} event_counts=${JSON.stringify(eventTypeCounts)}`, error)
             toast.error(error.message || 'Streaming connection error')
             setSending(false)
             setWaitingForResponse(false)
@@ -523,12 +769,6 @@ export default function ChatPage() {
             // All data (content, tool_calls, agent_name, metadata) comes from the stream
             // Status messages are ephemeral and already updated in real-time
             // The assistant message is already complete with all metadata from update events
-            const duration = Date.now() - streamStartTime
-            const eventSummary = Object.entries(eventTypeCounts)
-              .map(([type, count]) => `${type}=${count}`)
-              .join(', ')
-            console.log(`[FRONTEND] Stream handler completed session=${currentSession.id} duration=${duration}ms tokens=${tokenBatchCount} events={${eventSummary}}`)
-            
             setSending(false)
             setWaitingForResponse(false)
             setWaitingMessageId(null)
@@ -1738,13 +1978,115 @@ export default function ChatPage() {
                                           {toolCall.status && (
                                             <div>
                                               <div className="text-xs font-semibold text-muted-foreground mb-1">Status</div>
-                                              <div className={`text-xs px-2 py-1 rounded inline-block ${
-                                                toolCall.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                toolCall.status === 'executing' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' :
-                                                toolCall.status === 'error' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                                'bg-muted text-muted-foreground'
-                                              }`}>
-                                                {toolCall.status}
+                                              <div className="flex items-center gap-2">
+                                                <div className={`text-xs px-2 py-1 rounded inline-block ${
+                                                  toolCall.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                  toolCall.status === 'executing' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' :
+                                                  toolCall.status === 'error' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                  toolCall.status === 'pending' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
+                                                  'bg-muted text-muted-foreground'
+                                                }`}>
+                                                  {toolCall.status}
+                                                </div>
+                                                {/* Human-in-the-Loop Tool Review (aligned with LangGraph best practices) */}
+                                                {/* Reference: https://docs.langchain.com/oss/python/langgraph/use-functional-api#review-tool-calls */}
+                                                {(() => {
+                                                  const shouldShowReview = toolCall.status === 'pending' && toolCall.requires_approval === true && !!currentSession
+                                                  if (toolCall.status === 'pending') {
+                                                    console.log(`[HITL] [REVIEW] Tool call review check: tool=${toolName} status=${toolCall.status} requires_approval=${toolCall.requires_approval} has_requires_approval=${'requires_approval' in toolCall} currentSession=${!!currentSession} shouldShowReview=${shouldShowReview}`)
+                                                  }
+                                                  return shouldShowReview
+                                                })() && (
+                                                  <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded">
+                                                    <div className="text-xs font-semibold text-yellow-800 dark:text-yellow-200 mb-1">
+                                                      ⚠️ Tool requires approval
+                                                    </div>
+                                                    <div className="text-xs text-yellow-700 dark:text-yellow-300 mb-2">
+                                                      Review the tool call below before execution
+                                                    </div>
+                                                    <Button
+                                                      size="sm"
+                                                      onClick={async () => {
+                                                        console.log(`[HITL] [REVIEW] User clicked Approve & Execute: tool=${toolName} tool_call_id=${toolCall.id || toolCallId} session=${currentSession?.id}`)
+                                                        try {
+                                                          console.log(`[HITL] [REVIEW] Sending approval request: tool=${toolName} args=`, toolCall.args)
+                                                          // Build resume payload with approval decision
+                                                          const resumePayload = {
+                                                            approvals: {
+                                                              [toolCall.id || toolCallId]: {
+                                                                approved: true,
+                                                                args: toolCall.args || {}
+                                                              }
+                                                            }
+                                                          }
+                                                          
+                                                          const response = await agentAPI.approveTool({
+                                                            chat_session_id: currentSession.id,
+                                                            resume: resumePayload
+                                                          })
+                                                          
+                                                          console.log(`[HITL] [REVIEW] Approval response received: success=${response.data.success} session=${currentSession?.id}`)
+                                                          
+                                                          if (response.data.success) {
+                                                            console.log(`[HITL] [REVIEW] Tool approved and executed successfully: tool=${toolName} result_preview=${String(response.data.result || '').substring(0, 100)} session=${currentSession?.id}`)
+                                                            
+                                                            // Update the tool call with the result (aligned with LangGraph Command pattern)
+                                                            // This is equivalent to resuming with Command(resume=result) in LangGraph
+                                                            set((state: { messages: Message[] }) => ({
+                                                              messages: state.messages.map((m: Message) => {
+                                                                if (m.id === msg.id) {
+                                                                  const toolCalls = m.metadata?.tool_calls || []
+                                                                  const updatedToolCalls = toolCalls.map((tc: any, idx: number) => {
+                                                                    const tcActualId = tc.id || `tool-${m.id}-${idx}`
+                                                                    const tcComputedId = `tool-${m.id}-${idx}`
+                                                                    // Match by actual ID first, then by computed ID, then by tool name
+                                                                    const actualToolCallId = toolCall.id || toolCallId
+                                                                    const matches = (
+                                                                      tcActualId === actualToolCallId ||
+                                                                      tcComputedId === toolCallId ||
+                                                                      (tc.id === toolCall.id && tc.name === toolName)
+                                                                    )
+                                                                    
+                                                                    if (matches) {
+                                                                      console.log(`[HITL] [REVIEW] Updating tool call status: tool_call_id=${tcActualId} (matched by ${tcActualId === actualToolCallId ? 'actual ID' : tcComputedId === toolCallId ? 'computed ID' : 'name'}) from pending to completed session=${currentSession?.id}`)
+                                                                      return {
+                                                                        ...tc,
+                                                                        status: 'completed',
+                                                                        result: response.data.result,
+                                                                        requires_approval: false
+                                                                      }
+                                                                    }
+                                                                    return tc
+                                                                  })
+                                                                  return {
+                                                                    ...m,
+                                                                    metadata: {
+                                                                      ...m.metadata,
+                                                                      tool_calls: updatedToolCalls
+                                                                    }
+                                                                  }
+                                                                }
+                                                                return m
+                                                              })
+                                                            }))
+                                                            toast.success('Tool executed successfully')
+                                                            // Note: SSE connection remains open (with shorter timeout) to receive final response
+                                                            // The workflow will resume and stream the final response on the same connection
+                                                          } else {
+                                                            console.error(`[HITL] [REVIEW] Tool approval failed: error=${response.data.error} session=${currentSession?.id}`)
+                                                            toast.error(response.data.error || 'Tool execution failed')
+                                                          }
+                                                        } catch (error: any) {
+                                                          console.error(`[HITL] [REVIEW] Error approving tool:`, error, `session=${currentSession?.id}`)
+                                                          toast.error(getErrorMessage(error, 'Failed to approve tool'))
+                                                        }
+                                                      }}
+                                                      className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white"
+                                                    >
+                                                      ✓ Approve & Execute
+                                                    </Button>
+                                                  </div>
+                                                )}
                                               </div>
                                             </div>
                                           )}

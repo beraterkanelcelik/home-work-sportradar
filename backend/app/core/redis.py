@@ -78,8 +78,10 @@ async def get_redis_client() -> redis.Redis:
             decode_responses=False,  # We'll decode in the caller
             socket_connect_timeout=5,
             socket_timeout=5,
-            max_connections=50,
+            max_connections=50,  # Max connections per event loop (scalable via horizontal scaling)
             retry_on_timeout=True,
+            # Health check to detect stale connections
+            health_check_interval=30,  # Check connection health every 30 seconds
         )
         _pools_by_loop[loop] = pool
         logger.info("Redis connection pool created for loop %s", id(loop))

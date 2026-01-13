@@ -8,9 +8,11 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 3000,
-    watch: {
-      usePolling: true,
-    },
+    // Hot-reload disabled - restart container manually for code changes
+    // watch: {
+    //   usePolling: true,
+    // },
+    hmr: false, // Disable Hot Module Replacement
   },
   resolve: {
     alias: {
