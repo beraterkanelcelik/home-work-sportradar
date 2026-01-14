@@ -52,18 +52,18 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <h1 className="text-3xl font-bold mb-8">Dashboard</h1>
+      <h1 className="text-2xl sm:text-3xl font-bold mb-6 sm:mb-8">Dashboard</h1>
       
-      <div className="grid gap-6 md:grid-cols-2 mb-10">
-        <div className="p-6 border rounded-lg hover:bg-muted/50 transition-colors">
-          <h2 className="text-xl font-semibold mb-2">Start New Chat</h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-8 sm:mb-10">
+        <div className="p-4 sm:p-6 border rounded-lg hover:bg-muted/50 transition-colors">
+          <h2 className="text-lg sm:text-xl font-semibold mb-2">Start New Chat</h2>
           <p className="text-muted-foreground mb-4 text-sm">
             Begin a new conversation with the agent
           </p>
           <Button onClick={handleNewChat} className="rounded-lg">New Chat</Button>
         </div>
-        <div className="p-6 border rounded-lg hover:bg-muted/50 transition-colors">
-          <h2 className="text-xl font-semibold mb-2">Documents</h2>
+        <div className="p-4 sm:p-6 border rounded-lg hover:bg-muted/50 transition-colors">
+          <h2 className="text-lg sm:text-xl font-semibold mb-2">Documents</h2>
           <p className="text-muted-foreground mb-4 text-sm">
             Upload and manage your documents
           </p>
@@ -87,9 +87,9 @@ export default function DashboardPage() {
         <div>
           {/* Latest Documents */}
           <div>
-            <h2 className="text-xl font-semibold mb-4">Latest Documents</h2>
+            <h2 className="text-lg sm:text-xl font-semibold mb-4">Latest Documents</h2>
             {sortedDocuments.length === 0 ? (
-              <div className="border rounded-lg p-8 text-center">
+              <div className="border rounded-lg p-4 sm:p-8 text-center">
                 <p className="text-muted-foreground">No documents yet</p>
                 <Link to="/documents">
                   <Button variant="outline" className="mt-4 rounded-lg">Upload Your First Document</Button>

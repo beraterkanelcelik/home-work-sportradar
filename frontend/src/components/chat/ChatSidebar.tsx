@@ -58,6 +58,8 @@ interface ChatSidebarProps {
   sessionMenuOpen: number | null
   /** Callback to set session menu open */
   setSessionMenuOpen: (sessionId: number | null) => void
+  /** Callback to close sidebar (for mobile) */
+  onClose?: () => void
 }
 
 /**
@@ -91,16 +93,49 @@ export default function ChatSidebar({
   onCancelRename,
   sessionMenuOpen,
   setSessionMenuOpen,
+  onClose,
 }: ChatSidebarProps) {
-  if (!sidebarOpen) {
-    return (
-      <div className="w-0 transition-all duration-300 overflow-hidden border-r flex flex-col bg-background" />
-    )
+  // Handle session selection on mobile - close sidebar after selection
+  const handleSelectSession = (sessionId: number) => {
+    onSelectSession(sessionId)
+    // Close sidebar on mobile after selection
+    if (onClose && window.innerWidth < 768) {
+      onClose()
+    }
+  }
+
+  // Handle new chat on mobile - close sidebar after creation
+  const handleNewChat = async () => {
+    await onNewChat()
+    // Close sidebar on mobile after creation
+    if (onClose && window.innerWidth < 768) {
+      onClose()
+    }
   }
 
   return (
-    <div className="w-64 transition-all duration-300 overflow-hidden border-r flex flex-col bg-background">
-      <div className="flex-1 overflow-y-auto min-w-[256px]">
+    <>
+      {/* Mobile Backdrop - only show when sidebar is open on mobile */}
+      {sidebarOpen && onClose && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 md:hidden transition-opacity"
+          onClick={onClose}
+        />
+      )}
+      
+      {/* Sidebar */}
+      <div className={`
+        ${sidebarOpen ? 'w-[280px] max-w-[85vw] md:w-64' : 'w-0 md:w-0'}
+        fixed md:relative
+        top-0 left-0 md:left-auto
+        h-full md:h-auto
+        transition-all duration-300
+        overflow-hidden border-r
+        flex flex-col bg-background
+        z-50 md:z-auto
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+      `}>
+        <div className="flex-1 overflow-y-auto min-w-0">
         {/* Chats Section Header */}
         <div className="px-3 py-2 space-y-2">
           <div className="flex items-center justify-between">
@@ -120,7 +155,7 @@ export default function ChatSidebar({
             </button>
           </div>
           {chatsSectionOpen && (
-            <Button onClick={onNewChat} className="w-full" size="sm">
+            <Button onClick={handleNewChat} className="w-full" size="sm">
               New Chat
             </Button>
           )}
@@ -187,7 +222,7 @@ export default function ChatSidebar({
                       <>
                         <div
                           onClick={() => {
-                            onSelectSession(session.id)
+                            handleSelectSession(session.id)
                           }}
                           className="flex items-center justify-between"
                         >
@@ -259,5 +294,6 @@ export default function ChatSidebar({
         )}
       </div>
     </div>
+    </>
   )
 }

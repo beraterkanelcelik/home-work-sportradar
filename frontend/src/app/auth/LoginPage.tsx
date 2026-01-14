@@ -29,16 +29,16 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="max-w-md mx-auto">
-      <div className="flex flex-col items-center mb-8">
+    <div className="max-w-md mx-auto px-4">
+      <div className="flex flex-col items-center mb-6 sm:mb-8">
         <img 
           src={logo} 
           alt="Agent Playground" 
-          className="h-24 w-auto mb-5 object-contain"
+          className="h-16 sm:h-24 w-auto mb-4 sm:mb-5 object-contain"
         />
-        <h1 className="text-2xl font-bold">Login</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">Login</h1>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5">
         {error && (
           <div className="p-4 bg-destructive/10 text-destructive rounded-lg border border-destructive/20">
             {error}

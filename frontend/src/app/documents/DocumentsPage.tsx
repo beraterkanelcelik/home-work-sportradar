@@ -449,13 +449,13 @@ export default function DocumentsPage() {
 
   return (
     <>
-      <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
-          <h1 className="text-3xl font-bold">Documents</h1>
+      <div className="max-w-6xl mx-auto px-2 sm:px-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 sm:mb-8">
+          <h1 className="text-2xl sm:text-3xl font-bold">Documents</h1>
           <Button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            className="rounded-lg"
+            className="rounded-lg w-full sm:w-auto"
           >
             {uploading ? 'Uploading...' : 'Upload Document'}
           </Button>
@@ -476,7 +476,7 @@ export default function DocumentsPage() {
           onDragLeave={handleDrag}
           onDragOver={handleDrag}
           onDrop={handleDrop}
-          className={`border-2 border-dashed rounded-lg p-12 text-center mb-8 transition-colors ${
+          className={`border-2 border-dashed rounded-lg p-6 sm:p-12 text-center mb-6 sm:mb-8 transition-colors ${
             dragActive
               ? 'border-primary bg-primary/5'
               : 'border-muted hover:border-primary/50 hover:bg-muted/50'
@@ -515,7 +515,7 @@ export default function DocumentsPage() {
             </div>
           </div>
         ) : sortedDocuments.length === 0 ? (
-          <div className="border rounded-lg p-12 text-center">
+          <div className="border rounded-lg p-6 sm:p-12 text-center">
             <svg
               className="w-16 h-16 mx-auto mb-4 text-muted-foreground"
               fill="none"
@@ -544,8 +544,8 @@ export default function DocumentsPage() {
                 key={doc.id}
                 className="p-4 border rounded-lg hover:bg-muted/50 transition-colors"
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex items-start gap-3 flex-1">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 sm:gap-3 flex-1 min-w-0">
                     <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
                       <svg
                         className="w-5 h-5 text-primary"
@@ -583,14 +583,14 @@ export default function DocumentsPage() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
                     <button
                       onClick={() => handlePreview(doc)}
                       className="p-2 text-muted-foreground hover:text-primary transition-colors rounded-lg hover:bg-primary/10"
                       aria-label="Preview document"
                       title="Preview document"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                       </svg>
@@ -600,7 +600,7 @@ export default function DocumentsPage() {
                       className="p-2 text-muted-foreground hover:text-destructive transition-colors rounded-lg hover:bg-destructive/10"
                       aria-label="Delete document"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
@@ -624,7 +624,7 @@ export default function DocumentsPage() {
           onClick={cancelDelete}
         >
           <div
-            className="bg-background border rounded-lg p-6 max-w-md w-full mx-4 shadow-lg"
+            className="bg-background border rounded-lg p-4 sm:p-6 max-w-md w-full mx-4 shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-lg font-semibold mb-2">Delete Document</h3>
@@ -646,16 +646,16 @@ export default function DocumentsPage() {
       {/* Document Preview Modal */}
       {previewOpen && (
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-0 sm:p-4"
           onClick={closePreview}
         >
           <div
-            className="bg-background border rounded-lg max-w-6xl w-full max-h-[90vh] flex flex-col shadow-lg"
+            className="bg-background border-0 sm:border rounded-none sm:rounded-lg max-w-6xl w-full h-full sm:h-auto sm:max-h-[90vh] flex flex-col shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between p-6 border-b">
-              <h2 className="text-xl font-semibold">
+            <div className="flex items-center justify-between p-4 sm:p-6 border-b">
+              <h2 className="text-lg sm:text-xl font-semibold truncate pr-2">
                 {previewDocument?.title || 'Document Preview'}
               </h2>
               <button
@@ -669,10 +669,10 @@ export default function DocumentsPage() {
             </div>
 
             {/* Tabs */}
-            <div className="flex border-b">
+            <div className="flex border-b overflow-x-auto">
               <button
                 onClick={() => setPreviewTab('overview')}
-                className={`px-6 py-3 text-sm font-medium transition-colors ${
+                className={`px-4 sm:px-6 py-3 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   previewTab === 'overview'
                     ? 'border-b-2 border-primary text-primary'
                     : 'text-muted-foreground hover:text-foreground'
@@ -682,27 +682,27 @@ export default function DocumentsPage() {
               </button>
               <button
                 onClick={() => setPreviewTab('original')}
-                className={`px-6 py-3 text-sm font-medium transition-colors ${
+                className={`px-4 sm:px-6 py-3 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   previewTab === 'original'
                     ? 'border-b-2 border-primary text-primary'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                Original Document
+                Original
               </button>
               <button
                 onClick={() => setPreviewTab('text')}
-                className={`px-6 py-3 text-sm font-medium transition-colors ${
+                className={`px-4 sm:px-6 py-3 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   previewTab === 'text'
                     ? 'border-b-2 border-primary text-primary'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                Extracted Text
+                Text
               </button>
               <button
                 onClick={() => setPreviewTab('chunks')}
-                className={`px-6 py-3 text-sm font-medium transition-colors ${
+                className={`px-4 sm:px-6 py-3 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                   previewTab === 'chunks'
                     ? 'border-b-2 border-primary text-primary'
                     : 'text-muted-foreground hover:text-foreground'
@@ -713,7 +713,7 @@ export default function DocumentsPage() {
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-auto p-6">
+            <div className="flex-1 overflow-auto p-4 sm:p-6">
               {loadingPreview ? (
                 <div className="flex items-center justify-center py-12">
                   <div className="inline-flex items-center gap-2 text-muted-foreground">
@@ -730,7 +730,7 @@ export default function DocumentsPage() {
                     <>
                       <div>
                         <h3 className="text-sm font-semibold mb-3">Document Information</h3>
-                        <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                           <div>
                             <span className="text-muted-foreground">Status:</span>
                             <div className="mt-1">

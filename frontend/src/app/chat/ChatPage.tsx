@@ -1299,7 +1299,7 @@ export default function ChatPage() {
   // 4. StatsDialog - Statistics modal with activity timeline
   return (
     <>
-    <div className="flex h-[calc(100vh-145px)] bg-background">
+    <div className="flex h-[calc(100vh-120px)] sm:h-[calc(100vh-145px)] bg-background">
       {/* Sidebar Component - Handles session list, new chat, rename, delete */}
       {/* Location: frontend/src/components/chat/ChatSidebar.tsx */}
       <ChatSidebar
@@ -1320,6 +1320,7 @@ export default function ChatPage() {
         onCancelRename={handleCancelRename}
         sessionMenuOpen={sessionMenuOpen}
         setSessionMenuOpen={setSessionMenuOpen}
+        onClose={() => setSidebarOpen(false)}
       />
 
       {/* Main Chat Area */}

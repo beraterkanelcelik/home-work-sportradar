@@ -44,18 +44,18 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="max-w-md mx-auto">
-      <div className="flex flex-col items-center mb-8">
+    <div className="max-w-md mx-auto px-4">
+      <div className="flex flex-col items-center mb-6 sm:mb-8">
         <img 
           src={logo} 
           alt="Agent Playground" 
-          className="h-24 w-auto mb-5 object-contain"
+          className="h-16 sm:h-24 w-auto mb-4 sm:mb-5 object-contain"
         />
-        <h1 className="text-2xl font-bold">Sign Up</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">Sign Up</h1>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5">
         {error && (
-          <div className="p-4 bg-destructive/10 text-destructive rounded-lg border border-destructive/20">
+          <div className="p-3 sm:p-4 bg-destructive/10 text-destructive rounded-lg border border-destructive/20">
             {error}
           </div>
         )}
@@ -69,7 +69,7 @@ export default function SignupPage() {
             required
           />
         </div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium mb-2">First Name</label>
             <input

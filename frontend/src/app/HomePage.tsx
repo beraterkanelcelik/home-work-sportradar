@@ -99,19 +99,19 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh]">
-      <div className="flex flex-col items-center -mb-32">
+      <div className="flex flex-col items-center -mb-16 sm:-mb-24 md:-mb-32">
         <img 
           src={logoWithText} 
           alt="Agent Playground" 
-          className="h-96 w-auto object-contain"
+          className="h-48 sm:h-64 md:h-96 w-auto object-contain"
         />
       </div>
-      <p className="text-muted-foreground mb-6 text-center text-sm">
+      <p className="text-muted-foreground mb-4 sm:mb-6 text-center text-xs sm:text-sm px-4">
         Chat with AI agents powered by LangChain and LangGraph
       </p>
       
       {isAuthenticated ? (
-        <div className="w-full max-w-2xl px-4">
+        <div className="w-full max-w-full sm:max-w-2xl px-2 sm:px-4">
           <div className="relative">
             {/* Selected Options Badges */}
             {selectedOptions.length > 0 && (
@@ -185,7 +185,7 @@ export default function HomePage() {
                           className="fixed inset-0 z-10"
                           onClick={() => setPlusMenuOpen(false)}
                         />
-                        <div className="absolute bottom-full left-0 mb-2 w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
+                        <div className="absolute bottom-full left-0 mb-2 w-[calc(100vw-2rem)] sm:w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
                           <button
                             type="button"
                             onClick={handleFileSelectionFromPlus}

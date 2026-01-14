@@ -178,7 +178,7 @@ export default function ChatInput({
                     className="fixed inset-0 z-10"
                     onClick={() => setPlusMenuOpen(false)}
                   />
-                  <div className="absolute bottom-full left-0 mb-2 w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
+                  <div className="absolute bottom-full left-0 mb-2 w-[calc(100vw-2rem)] sm:w-64 bg-background border rounded-lg shadow-lg p-2 z-20">
                     <button
                       type="button"
                       onClick={handleFileSelectionFromPlus}
@@ -234,9 +234,9 @@ export default function ChatInput({
   if (isEmptyState) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="w-full max-w-2xl px-4">
-          <div className="text-center mb-8">
-            <h2 className="text-4xl font-light text-foreground/80 mb-2">
+        <div className="w-full max-w-full sm:max-w-2xl px-2 sm:px-4">
+          <div className="text-center mb-6 sm:mb-8">
+            <h2 className="text-2xl sm:text-3xl md:text-4xl font-light text-foreground/80 mb-2">
               What can I help with?
             </h2>
           </div>
@@ -250,7 +250,7 @@ export default function ChatInput({
 
   return (
     <div className="bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 animate-slide-up">
-      <div className="max-w-3xl mx-auto px-4 pt-2 pb-1">
+      <div className="max-w-full sm:max-w-3xl mx-auto px-2 sm:px-4 pt-2 pb-1">
         {inputContent}
       </div>
     </div>

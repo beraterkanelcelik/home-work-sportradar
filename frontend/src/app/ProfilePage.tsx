@@ -145,43 +145,43 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <h1 className="text-3xl font-bold">Profile</h1>
+    <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
+      <h1 className="text-2xl sm:text-3xl font-bold">Profile</h1>
 
       {/* Token Usage Section */}
       {stats && (
-        <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
-          <h2 className="text-xl font-semibold mb-4">Token Usage</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+        <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
+          <h2 className="text-lg sm:text-xl font-semibold mb-4">Token Usage</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
             <div>
               <label className="text-sm font-medium text-muted-foreground block mb-1">Total Tokens</label>
-              <p className="text-2xl font-bold">{stats.total_tokens.toLocaleString()}</p>
+              <p className="text-xl sm:text-2xl font-bold">{stats.total_tokens.toLocaleString()}</p>
             </div>
             <div>
               <label className="text-sm font-medium text-muted-foreground block mb-1">Input Tokens</label>
-              <p className="text-2xl font-bold">{stats.input_tokens.toLocaleString()}</p>
+              <p className="text-xl sm:text-2xl font-bold">{stats.input_tokens.toLocaleString()}</p>
             </div>
             <div>
               <label className="text-sm font-medium text-muted-foreground block mb-1">Output Tokens</label>
-              <p className="text-2xl font-bold">{stats.output_tokens.toLocaleString()}</p>
+              <p className="text-xl sm:text-2xl font-bold">{stats.output_tokens.toLocaleString()}</p>
             </div>
             <div>
               <label className="text-sm font-medium text-muted-foreground block mb-1">Cached Tokens</label>
-              <p className="text-2xl font-bold">{stats.cached_tokens.toLocaleString()}</p>
+              <p className="text-xl sm:text-2xl font-bold">{stats.cached_tokens.toLocaleString()}</p>
             </div>
           </div>
           {stats.total_cost > 0 && (
-            <div className="mt-6 pt-6 border-t">
+            <div className="mt-4 sm:mt-6 pt-4 sm:pt-6 border-t">
               <label className="text-sm font-medium text-muted-foreground block mb-1">Total Cost</label>
-              <p className="text-3xl font-bold">${stats.total_cost.toFixed(4)}</p>
+              <p className="text-2xl sm:text-3xl font-bold">${stats.total_cost.toFixed(4)}</p>
             </div>
           )}
         </div>
       )}
 
       {/* Basic Information Section */}
-      <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
-        <h2 className="text-xl font-semibold mb-4">Basic Information</h2>
+      <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
+        <h2 className="text-lg sm:text-xl font-semibold mb-4">Basic Information</h2>
         {!editing ? (
           <div className="space-y-4">
             <div>
@@ -234,7 +234,7 @@ export default function ProfilePage() {
                 className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               />
             </div>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-3">
               <Button onClick={handleSaveProfile} disabled={saving} className="rounded-lg">
                 {saving ? 'Saving...' : 'Save Changes'}
               </Button>
@@ -251,8 +251,8 @@ export default function ProfilePage() {
       </div>
 
       {/* Change Password Section */}
-      <div className="border rounded-lg p-6 hover:bg-muted/50 transition-colors">
-        <h2 className="text-xl font-semibold mb-4">Change Password</h2>
+      <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
+        <h2 className="text-lg sm:text-xl font-semibold mb-4">Change Password</h2>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-2">Current Password</label>

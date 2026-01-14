@@ -260,7 +260,7 @@ export default function ServiceStatus() {
             className="fixed inset-0 z-10"
             onClick={() => setDropdownOpen(false)}
           />
-          <div className="absolute top-full right-0 mt-1 w-72 bg-background border rounded-lg shadow-lg p-2 z-20">
+          <div className="absolute top-full right-0 sm:right-0 left-0 sm:left-auto mt-1 w-[calc(100vw-2rem)] sm:w-72 max-w-[calc(100vw-2rem)] sm:max-w-none bg-background border rounded-lg shadow-lg p-2 z-20">
             <div className="flex items-center justify-between mb-2 px-2 py-1">
               <span className="text-sm font-semibold">Service Status</span>
               <button

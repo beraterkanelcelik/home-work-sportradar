@@ -75,12 +75,12 @@ export default function ChatHeader({
   const contextUsage = latestAssistantMessage?.context_usage
 
   return (
-    <div className="px-4 py-1 flex items-center justify-between bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-2">
+    <div className="px-2 sm:px-4 py-1 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="flex items-center gap-2 w-full sm:w-auto">
         {/* Sidebar Toggle */}
         <button
           onClick={onToggleSidebar}
-          className="p-1 hover:bg-muted rounded-md transition-colors"
+          className="p-1 hover:bg-muted rounded-md transition-colors flex-shrink-0"
           aria-label="Toggle sidebar"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -89,17 +89,17 @@ export default function ChatHeader({
         </button>
         
         {/* Model Selection Dropdown */}
-        <div className="relative flex items-center gap-2">
-          <div className="flex flex-col">
+        <div className="relative flex items-center gap-2 flex-1 sm:flex-initial">
+          <div className="flex flex-col min-w-0">
             <button
               onClick={() => setModelDropdownOpen(!modelDropdownOpen)}
-              className="flex items-center gap-1 px-2 py-0.5 hover:bg-muted rounded-md transition-colors text-sm"
+              className="flex items-center gap-1 px-2 py-0.5 hover:bg-muted rounded-md transition-colors text-sm w-full sm:w-auto"
             >
-              <span className="font-medium">
+              <span className="font-medium truncate">
                 {selectedModelName}
               </span>
               <svg 
-                className={`w-3 h-3 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`}
+                className={`w-3 h-3 transition-transform flex-shrink-0 ${modelDropdownOpen ? 'rotate-180' : ''}`}
                 fill="none" 
                 stroke="currentColor" 
                 viewBox="0 0 24 24"
@@ -107,9 +107,9 @@ export default function ChatHeader({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
-            {/* Context Usage Display */}
+            {/* Context Usage Display - hide on very small screens */}
             {contextUsage && (
-              <div className="text-xs text-muted-foreground px-2">
+              <div className="text-xs text-muted-foreground px-2 hidden sm:block">
                 {contextUsage.total_tokens.toLocaleString()} / {contextUsage.context_window.toLocaleString()} tokens ({contextUsage.usage_percentage}%)
               </div>
             )}
@@ -122,7 +122,7 @@ export default function ChatHeader({
                 className="fixed inset-0 z-10"
                 onClick={() => setModelDropdownOpen(false)}
               />
-              <div className="absolute top-full left-0 mt-1 w-56 bg-background border rounded-lg shadow-lg p-1 z-20">
+              <div className="absolute top-full left-0 mt-1 w-[calc(100vw-2rem)] sm:w-56 bg-background border rounded-lg shadow-lg p-1 z-20">
                 {availableModels.map((model) => (
                   <button
                     key={model.id}
@@ -145,7 +145,7 @@ export default function ChatHeader({
       </div>
       
       {/* More Options Menu */}
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 self-end sm:self-auto">
         <div className="relative">
           <button
             onClick={() => setHeaderMoreMenuOpen(!headerMoreMenuOpen)}
