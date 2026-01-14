@@ -10,6 +10,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')
 django.setup()
 
 import asyncio
+import signal
 from datetime import timedelta
 from temporalio.client import Client
 from temporalio.service import RetryConfig, KeepAliveConfig
@@ -85,7 +86,20 @@ async def run_worker():
     Configured according to Temporal best practices:
     - Appropriate concurrency limits
     - Proper task queue isolation
+    - Graceful shutdown handling
     """
+    # LOW-1: Setup graceful shutdown with signal handlers
+    shutdown_event = asyncio.Event()
+    
+    def handle_shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        shutdown_event.set()
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+    
+    worker = None
     try:
         # Connect with retry logic
         client = await connect_with_retry()
@@ -118,12 +132,30 @@ async def run_worker():
         )
         
         logger.info("Worker started, waiting for tasks...")
-        await worker.run()
+        
+        # Run worker until shutdown signal
+        try:
+            await asyncio.gather(
+                worker.run(),
+                shutdown_event.wait()
+            )
+        except asyncio.CancelledError:
+            logger.info("Worker tasks cancelled")
+            pass
     except KeyboardInterrupt:
-        logger.info("Worker shutdown requested")
+        logger.info("Worker shutdown requested via KeyboardInterrupt")
     except Exception as e:
         logger.error(f"Fatal error running worker: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Graceful shutdown: wait for in-flight activities to complete
+        if worker:
+            logger.info("Shutting down worker gracefully...")
+            try:
+                await worker.shutdown()
+                logger.info("Worker shutdown complete")
+            except Exception as e:
+                logger.error(f"Error during worker shutdown: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

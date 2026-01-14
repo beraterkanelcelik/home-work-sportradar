@@ -2,6 +2,7 @@
 Main workflow entrypoint for LangGraph Functional API.
 """
 import asyncio
+import atexit
 from typing import Optional, List, Dict, Any, AsyncIterator, Union
 from langgraph.func import entrypoint
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -131,6 +132,25 @@ def get_checkpointer() -> Optional[PostgresSaver]:
     if _checkpointer is None:
         _checkpointer = CheckpointerWrapper()
     return _checkpointer
+
+
+def cleanup_checkpointer():
+    """
+    HIGH-4: Cleanup checkpointer on application shutdown.
+    Ensures context manager __exit__ is called properly.
+    """
+    global _checkpointer
+    if _checkpointer and hasattr(_checkpointer, '_checkpointer_cm'):
+        try:
+            if _checkpointer._checkpointer_cm:
+                _checkpointer._checkpointer_cm.__exit__(None, None, None)
+                logger.info("Checkpointer cleaned up on shutdown")
+        except Exception as e:
+            logger.warning(f"Error cleaning up checkpointer: {e}")
+
+
+# Register cleanup handler for application shutdown
+atexit.register(cleanup_checkpointer)
 
 
 # Create checkpointer instance for @entrypoint

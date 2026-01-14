@@ -12,7 +12,11 @@ from app.core.dependencies import get_current_user, get_current_user_async
 from app.core.logging import get_logger
 from app.core.redis import get_redis_client
 from app.agents.temporal.workflow_manager import get_or_create_workflow
-from app.settings import TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE
+from app.settings import (
+    TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE,
+    STREAM_TIMEOUT_SECONDS, SSE_HEARTBEAT_SECONDS,
+    MAX_CONCURRENT_STREAMS_PER_USER, APPROVAL_WAIT_TIMEOUT_SECONDS
+)
 
 logger = get_logger(__name__)
 
@@ -40,12 +44,50 @@ async def stream_agent(request):
             status=401
         )
     
+    # CRITICAL-5: Rate limiting - limit concurrent streams per user
+    from django.core.cache import cache
+    stream_count_key = f"user_streams:{user.id}"
+    
+    # Check current stream count
+    current_count = cache.get(stream_count_key, 0)
+    if current_count >= MAX_CONCURRENT_STREAMS_PER_USER:
+        logger.warning(f"Rate limit exceeded for user {user.id}: {current_count}/{MAX_CONCURRENT_STREAMS_PER_USER} streams")
+        return JsonResponse({
+            'error': 'Too many concurrent streams',
+            'limit': MAX_CONCURRENT_STREAMS_PER_USER
+        }, status=429)
+    
+    # Increment stream count
+    cache.set(stream_count_key, current_count + 1, timeout=600)  # 10 min TTL
+    
     try:
         data = json.loads(request.body)
         chat_session_id = data.get('chat_session_id')
         message = data.get('message', '').strip()
         plan_steps = data.get('plan_steps')
         flow = data.get('flow', 'main')
+        
+        # CRITICAL-4: Generate or use provided idempotency key
+        idempotency_key = data.get('idempotency_key') or str(uuid.uuid4())
+        
+        # Check for duplicate request using Redis
+        try:
+            redis_client = await get_redis_client()
+            cache_key = f"stream_processing:{chat_session_id}:{idempotency_key}"
+            is_new = await redis_client.set(cache_key, "1", ex=60, nx=True)
+            
+            if not is_new:
+                logger.warning(
+                    f"Duplicate request detected: session={chat_session_id} "
+                    f"key={idempotency_key} user={user.id}"
+                )
+                return JsonResponse({
+                    'error': 'Request already processing',
+                    'idempotency_key': idempotency_key
+                }, status=409)
+        except Exception as redis_error:
+            # If Redis is unavailable, log warning but continue (non-blocking)
+            logger.warning(f"Failed to check idempotency key in Redis: {redis_error}")
         
         if not chat_session_id:
             logger.warning(f"Missing chat_session_id in stream_agent request from user {user.id}")
@@ -156,25 +198,29 @@ async def stream_agent(request):
                             )
                             logger.info(f"Using Temporal workflow {workflow_handle.id} for chat {chat_session_id} (signal sent automatically)")
                         except Exception as e:
-                            logger.warning(f"Failed to start Temporal workflow, falling back to direct streaming: {e}", exc_info=True)
-                            # Fall back to direct streaming
-                            from app.agents.runner import stream_agent_events_async
-                            async for event in stream_agent_events_async(
-                                user.id, chat_session_id, message, plan_steps, flow
-                            ):
-                                yield _format_sse_event(event)
+                            logger.error(f"Failed to start Temporal workflow: {e}", exc_info=True)
+                            # Return error event instead of falling back to direct streaming
+                            # This ensures durability guarantees are maintained
+                            yield _format_sse_event({
+                                "type": "error",
+                                "data": {
+                                    "error": "Workflow unavailable",
+                                    "retry": True,
+                                    "fetch": f"/api/chats/{chat_session_id}/messages/"
+                                }
+                            })
                             return
                         
                         # Listen to Redis messages with timeout handling and reconnection
                         # Scalability: Use shorter timeout for approval waiting (5 min) vs normal streaming (10 min)
                         # This prevents long-lived connections from consuming server resources
-                        timeout_seconds = 600  # 10 minutes max for normal streaming
-                        interrupt_wait_timeout = 300  # 5 minutes max when waiting for interrupt resume
+                        timeout_seconds = STREAM_TIMEOUT_SECONDS
+                        interrupt_wait_timeout = 300  # 5 minutes max when waiting for interrupt resume (can be externalized later)
                         loop = asyncio.get_running_loop()
                         start_time = loop.time()
                         waiting_for_resume = False
                         last_heartbeat_time = start_time
-                        heartbeat_interval = 30  # Send heartbeat every 30 seconds to keep connection alive
+                        heartbeat_interval = SSE_HEARTBEAT_SECONDS
                         
                         # Redis reconnection settings
                         MAX_RECONNECT_ATTEMPTS = 3
@@ -369,19 +415,19 @@ async def stream_agent(request):
                                     }
                                 })
                         except Exception:
-                            # Ignore recovery errors - will fall through to direct streaming
+                            # Ignore recovery errors
                             pass
                         
-                        # Fall through to direct streaming
-                        use_redis = False
-                
-                if not use_redis:
-                    # Fallback to direct streaming
-                    from app.agents.runner import stream_agent_events_async
-                    async for event in stream_agent_events_async(
-                        user.id, chat_session_id, message, plan_steps, flow
-                    ):
-                        yield _format_sse_event(event)
+                        # Return error instead of falling back to direct streaming
+                        yield _format_sse_event({
+                            "type": "error",
+                            "data": {
+                                "error": "Redis streaming unavailable",
+                                "retry": True,
+                                "fetch": f"/api/chats/{chat_session_id}/messages/"
+                            }
+                        })
+                        return
                         
             except Exception as e:
                 logger.error(f"Error in agent stream for user {user.id}, session {chat_session_id}: {e}", exc_info=True)
@@ -391,6 +437,14 @@ async def stream_agent(request):
                     "data": {"error": str(e)}
                 })
             finally:
+                # Decrement stream count on cleanup
+                try:
+                    current = cache.get(stream_count_key, 0)
+                    if current > 0:
+                        cache.set(stream_count_key, current - 1, timeout=600)
+                except Exception as e:
+                    logger.debug(f"Error decrementing stream count: {e}")
+                
                 # Cleanup pubsub only if we're still in the same loop that created it
                 # CRITICAL: Never create a new loop for cleanup - only cleanup if we're in the same loop
                 if pubsub:
@@ -485,9 +539,23 @@ async def stream_agent(request):
     
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in stream_agent request: {e}")
+        # Decrement stream count on error
+        try:
+            current = cache.get(stream_count_key, 0)
+            if current > 0:
+                cache.set(stream_count_key, current - 1, timeout=600)
+        except Exception:
+            pass
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     except Exception as e:
         logger.error(f"Unexpected error in stream_agent endpoint: {e}", exc_info=True)
+        # Decrement stream count on error
+        try:
+            current = cache.get(stream_count_key, 0)
+            if current > 0:
+                cache.set(stream_count_key, current - 1, timeout=600)
+        except Exception:
+            pass
         return JsonResponse({'error': str(e)}, status=500)
 
 
@@ -543,6 +611,17 @@ async def approve_tool(request):
                 status=400
             )
         
+        # CRITICAL-2: Validate session ownership before processing approval
+        from app.services.chat_service import get_session
+        from asgiref.sync import sync_to_async
+        
+        session = await sync_to_async(get_session)(user.id, chat_session_id)
+        if not session:
+            logger.warning(f"[HITL] [SECURITY] Session ownership validation failed: user={user.id} session={chat_session_id}")
+            return JsonResponse({
+                'error': 'Chat session not found or access denied'
+            }, status=404)
+        
         logger.info(f"[HITL] [RESUME] Resume request received: user={user.id} session={chat_session_id} resume_keys={list(resume.keys()) if isinstance(resume, dict) else 'N/A'}")
         
         # Update database FIRST: Mark tool calls as approved/rejected in the message that was saved before interrupt
@@ -568,6 +647,27 @@ async def approve_tool(request):
                     tool_calls = metadata.get("tool_calls", [])
                     
                     if tool_calls:
+                        # CRITICAL-3: Validate tool_call_ids before processing approvals
+                        # Get expected tool_call_ids from stored message (only those awaiting approval)
+                        expected_ids = {
+                            tc.get("id")
+                            for tc in tool_calls
+                            if tc.get("status") == "awaiting_approval"
+                        }
+                        provided_ids = set(approvals.keys())
+                        
+                        # Reject unknown tool_call_ids
+                        unknown_ids = provided_ids - expected_ids
+                        if unknown_ids:
+                            logger.warning(
+                                f"[HITL] [SECURITY] Unknown tool_call_ids in approval: {unknown_ids} "
+                                f"user={user.id} session={chat_session_id}"
+                            )
+                            return JsonResponse({
+                                'error': 'Invalid tool_call_ids',
+                                'unknown_ids': list(unknown_ids)
+                            }, status=400)
+                        
                         # Update tool call statuses based on approval decisions
                         updated_tool_calls = []
                         for tc in tool_calls:
@@ -643,7 +743,7 @@ async def approve_tool(request):
         from asgiref.sync import sync_to_async
         import time
         
-        WAIT_TIMEOUT_SECONDS = int(os.getenv('APPROVE_TOOL_WAIT_TIMEOUT', '30'))  # Longer timeout for tool execution
+        WAIT_TIMEOUT_SECONDS = APPROVAL_WAIT_TIMEOUT_SECONDS
         POLL_INTERVAL_SECONDS = 0.5
         
         # Get the user message ID that triggered this approval (for correlation)

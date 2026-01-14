@@ -103,6 +103,33 @@ def health_check(request):
             "message": "Langfuse is disabled"
         }
     
+    # Check Redis (optional, won't fail if not configured)
+    try:
+        from app.core.redis import get_redis_client
+        import asyncio
+        
+        # Use sync wrapper for health check (Django view is sync)
+        # Create a new event loop for this check
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        redis_client = loop.run_until_complete(get_redis_client())
+        loop.run_until_complete(redis_client.ping())
+        services["redis"] = {
+            "status": "healthy",
+            "message": "Redis connection successful"
+        }
+        loop.close()
+    except Exception as e:
+        services["redis"] = {
+            "status": "degraded",
+            "message": f"Redis connection failed: {str(e)}"
+        }
+        # Don't fail overall status - Redis is optional for non-streaming mode
+    
     # Check Temporal (optional, won't fail if not configured)
     if TEMPORAL_ADDRESS:
         try:

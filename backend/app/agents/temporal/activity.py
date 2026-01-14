@@ -9,6 +9,7 @@ from typing import Dict, Any
 from app.agents.runner import AgentRunner
 from app.core.redis import get_redis_client
 from app.core.logging import get_logger
+from app.settings import REDIS_PUBLISH_CONCURRENCY
 
 logger = get_logger(__name__)
 
@@ -207,18 +208,19 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         logger.info(f"[ACTIVITY] Executing in stream mode: session={chat_id}")
         
         # Initialize Redis and build channel for streaming
-        # CRITICAL: Use user_id as tenant_id if tenant_id is missing to match SSE subscription
+        # HIGH-1: Make tenant_id required - remove dangerous "default" fallback
+        # Use user_id as tenant_id if tenant_id is missing to match SSE subscription
         # SSE endpoint subscribes to chat:{user.id}:{chat_id}, so we must publish to the same channel
         tenant_id = state.get("tenant_id") or state.get("user_id")
         if not tenant_id:
             logger.error(
-                f"[ACTIVITY_CHANNEL] CRITICAL: No tenant_id or user_id in state for chat_id={chat_id}. "
-                f"State keys: {list(state.keys())}. This will cause channel mismatch and frontend won't receive tokens!"
-            )
-            raise ValueError(
-                f"Cannot determine Redis channel for chat_id={chat_id}: missing user_id/tenant_id in state. "
+                f"[ACTIVITY_ERROR] Missing tenant_id in state for chat_id={chat_id}. "
                 f"State keys: {list(state.keys())}"
             )
+            return {
+                "status": "error",
+                "error": "Missing tenant_id in workflow state"
+            }
         tenant_id = str(tenant_id)  # Ensure it's a string
         channel = f"chat:{tenant_id}:{chat_id}"
         logger.info(f"Starting chat activity for chat_id={chat_id}, channel={channel} (tenant_id={tenant_id}, user_id={state.get('user_id')})")
@@ -234,11 +236,15 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         event_count = [0]  # Use list for mutable closure
         interrupt_data = None  # Track interrupt data for resume
         
+        # HIGH-3: Use time-based heartbeat instead of event-count-based
+        import time
+        last_heartbeat_time = time.time()
+        HEARTBEAT_INTERVAL = 10  # seconds
+        
         # Semaphore for backpressure: cap concurrent publish operations
         # Prevents unbounded in-flight tasks if publish rate > completion rate
         # Create Redis publisher for streaming events
-        PUBLISH_CONCURRENCY_LIMIT = int(os.getenv('REDIS_PUBLISH_CONCURRENCY_LIMIT', '100'))
-        publish_semaphore = asyncio.Semaphore(PUBLISH_CONCURRENCY_LIMIT)
+        publish_semaphore = asyncio.Semaphore(REDIS_PUBLISH_CONCURRENCY)
         
         # Run workflow using AgentRunner.stream()
         # Publish to Redis directly in the loop (non-blocking) to ensure tasks execute properly
@@ -287,14 +293,21 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                         pass
                     logger.error(f"[REDIS_PUBLISH] Failed to create publish task for {event_type} (event_count={current_count}): {e}", exc_info=True)
             
-            # Send heartbeat periodically (every 10 events or on important events)
-            if event_count[0] % 10 == 0 or event.get("type") in ["final", "interrupt", "error"]:
+            # HIGH-3: Time-based heartbeat (every 10 seconds or on important events)
+            current_time = time.time()
+            should_heartbeat = (
+                (current_time - last_heartbeat_time >= HEARTBEAT_INTERVAL) or
+                event.get("type") in ["final", "interrupt", "error"]
+            )
+            
+            if should_heartbeat:
                 activity.heartbeat({
                     "status": "processing",
                     "chat_id": chat_id,
                     "event_count": event_count[0],
                     "last_event_type": event.get("type"),
                 })
+                last_heartbeat_time = current_time
             
             # Check for interrupt (LangGraph native interrupt pattern)
             if event.get("type") == "interrupt":

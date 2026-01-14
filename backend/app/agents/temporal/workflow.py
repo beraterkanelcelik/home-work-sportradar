@@ -3,6 +3,7 @@ Temporal workflow definitions for chat execution.
 Long-running workflow per chat session using signals.
 """
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from temporalio import workflow
@@ -12,6 +13,11 @@ from collections import deque
 
 # Import activity - sandbox restrictions configured in worker to allow this
 from app.agents.temporal.activity import run_chat_activity
+
+# Read timeout from environment variable directly (cannot import from app.settings due to sandbox restrictions)
+# Workflows must be deterministic and cannot import Django settings which may have side effects
+TEMPORAL_APPROVAL_TIMEOUT_MINUTES = int(os.getenv('TEMPORAL_APPROVAL_TIMEOUT_MINUTES', '10'))
+TEMPORAL_ACTIVITY_TIMEOUT_MINUTES = int(os.getenv('TEMPORAL_ACTIVITY_TIMEOUT_MINUTES', '10'))
 
 
 @dataclass
@@ -261,9 +267,9 @@ class ChatWorkflow:
                         run_chat_activity,
                         activity_input,
                         # Total time allowed from scheduling to completion (includes all retries)
-                        schedule_to_close_timeout=timedelta(minutes=30),
+                        schedule_to_close_timeout=timedelta(minutes=30),  # Keep at 30 min for retries
                         # Maximum time for a single attempt
-                        start_to_close_timeout=timedelta(minutes=10),
+                        start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
                         # Heartbeat timeout - activity must heartbeat within this interval
                         heartbeat_timeout=timedelta(seconds=60),  # Increased from 30s for slow LLM responses
                         # Retry policy for transient failures
@@ -299,7 +305,7 @@ class ChatWorkflow:
                             workflow.logger.info(f"[HITL] Entering wait_condition - workflow will pause until resume_payload is set session={chat_id}")
                             await workflow.wait_condition(
                                 lambda: self.resume_payload is not None,
-                                timeout=timedelta(minutes=10)  # 10 minute timeout for approval
+                                timeout=timedelta(minutes=TEMPORAL_APPROVAL_TIMEOUT_MINUTES)
                             )
                             print(f"[HITL] wait_condition returned - resume_payload is now set session={chat_id}")
                             workflow.logger.info(f"[HITL] wait_condition returned - resume_payload is now set session={chat_id}")
@@ -320,8 +326,8 @@ class ChatWorkflow:
                             result = await workflow.execute_activity(
                                 run_chat_activity,
                                 activity_input_continue,
-                                schedule_to_close_timeout=timedelta(minutes=30),
-                                start_to_close_timeout=timedelta(minutes=10),
+                                schedule_to_close_timeout=timedelta(minutes=30),  # Keep at 30 min for retries
+                                start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
                                 heartbeat_timeout=timedelta(seconds=60),  # Increased from 30s for slow LLM responses
                                 retry_policy=RetryPolicy(
                                     maximum_attempts=3,
