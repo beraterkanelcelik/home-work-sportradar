@@ -45,20 +45,24 @@ def build_db_url() -> str:
 @lru_cache(maxsize=1)
 def get_sync_checkpointer() -> PostgresSaver:
     """
-    Get cached sync checkpointer - connection pool managed by psycopg.
+    Get cached sync checkpointer with long-lived connection.
 
-    PostgresSaver.from_conn_string() creates a saver with an internal connection pool.
-    We use it as a context manager to properly manage the connection lifecycle.
-    @lru_cache ensures we keep the context manager open for the life of the process.
+    Creates a PostgresSaver with a persistent connection for the lifetime of the process.
+    @lru_cache ensures the instance is created once and reused.
 
     Returns:
-        PostgresSaver instance (context manager kept open by cache)
+        PostgresSaver instance with persistent connection
     """
     try:
+        from psycopg import Connection
+
         db_url = build_db_url()
-        # Create checkpointer - use as context manager but keep it open
-        # The context manager manages connection lifecycle
-        checkpointer = PostgresSaver.from_conn_string(db_url)
+        # Create a long-lived connection with autocommit enabled
+        # This is the recommended approach for persistent checkpointers
+        conn = Connection.connect(db_url, autocommit=True, prepare_threshold=0)
+
+        # Create PostgresSaver with the connection
+        checkpointer = PostgresSaver(conn)
 
         # Initialize database tables (required by LangGraph)
         # This is safe to call multiple times - it only creates tables if they don't exist

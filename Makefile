@@ -12,6 +12,9 @@ build: ## Build all Docker images
 up: ## Start all services
 	docker-compose up -d
 
+up-observability: ## Start all services with observability (Langfuse, ClickHouse, MinIO, Temporal UI)
+	docker-compose --profile observability up -d
+
 down: ## Stop all services
 	docker-compose down
 

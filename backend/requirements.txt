@@ -50,6 +50,9 @@ spacy>=3.7.0
 
 # Vector database support
 pgvector>=0.2.0
+# NumPy compatibility for older CPUs (before x86-64-v2 requirement)
+# Use 1.26.x series which doesn't have X86_V2 baseline by default
+numpy>=1.26.0,<2.0.0
 
 # Reranking
 cohere>=4.0.0

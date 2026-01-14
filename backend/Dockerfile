@@ -20,8 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 # Install Python dependencies
+# Install NumPy first with explicit version to ensure compatibility
+# NumPy 1.26.x doesn't have X86_V2 baseline by default, avoiding CPU compatibility issues
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir "numpy>=1.26.0,<2.0.0" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . /app
