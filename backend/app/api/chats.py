@@ -199,45 +199,12 @@ def chat_messages(request, session_id):
                     status=400
                 )
             
-            # Add user message first
-            user_message = add_message(session_id, 'user', content, tokens_used=0)
-            
-            # Execute agent (nodes will save assistant message with tokens)
-            from app.agents.runner import execute_agent
-            
-            result = execute_agent(
-                user_id=user.id,
-                chat_session_id=session_id,
-                message=content
-            )
-            
-            # Get the assistant message that was saved by the node
-            from app.db.models.message import Message
-            assistant_messages = Message.objects.filter(
-                session_id=session_id,
-                role='assistant'
-            ).order_by('-created_at')[:1]
-            
-            assistant_message = assistant_messages[0] if assistant_messages else None
-            
+            # This endpoint is deprecated - use /api/agent/stream/ for agent execution
+            # POST to /api/chats/<session_id>/messages/ is only for adding messages without agent execution
+            # For agent execution, clients should use the streaming endpoint
             return JsonResponse({
-                'message': 'Message sent successfully',
-                'user_message': {
-                    'id': user_message.id,
-                    'role': user_message.role,
-                    'content': user_message.content,
-                    'created_at': user_message.created_at.isoformat(),
-                },
-                'assistant_message': {
-                    'id': assistant_message.id if assistant_message else None,
-                    'role': assistant_message.role if assistant_message else 'assistant',
-                    'content': assistant_message.content if assistant_message else result.get("response", ""),
-                    'tokens_used': assistant_message.tokens_used if assistant_message else 0,
-                    'created_at': assistant_message.created_at.isoformat() if assistant_message else None,
-                },
-                'agent': result.get("agent"),
-                'tool_calls': result.get("tool_calls", []),
-            }, status=201)
+                'error': 'This endpoint does not support agent execution. Use /api/agent/stream/ for agent responses.'
+            }, status=400)
         
         except json.JSONDecodeError:
             return JsonResponse({'error': 'Invalid JSON'}, status=400)

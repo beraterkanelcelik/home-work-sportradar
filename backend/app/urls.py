@@ -42,7 +42,6 @@ urlpatterns = [
     path('api/documents/<int:document_id>/index/', documents.document_index, name='document_index'),
     
     # Agent
-    path('api/agent/run/', agent.run_agent, name='run_agent'),
     path('api/agent/stream/', agent.stream_agent, name='stream_agent'),
     path('api/agent/approve-tool/', agent.approve_tool, name='approve_tool'),
     

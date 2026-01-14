@@ -1,8 +1,7 @@
 """
 Agent execution and event streaming using LangGraph Functional API.
 
-This module provides a unified AgentRunner class that handles both streaming
-and non-streaming execution, with the stream/non-stream switch at the API layer.
+This module provides AgentRunner class for streaming execution via SSE (Server-Sent Events).
 """
 import uuid
 import os
@@ -46,10 +45,9 @@ def serialize_response(response: AgentResponse) -> Dict[str, Any]:
 
 class AgentRunner:
     """
-    Unified runner for agent execution that handles both streaming and non-streaming modes.
+    Runner for agent execution that handles streaming via SSE (Server-Sent Events).
     
-    The stream/non-stream switch is handled by calling either run() or stream(),
-    keeping the graph logic stream-agnostic.
+    Uses the stream() method to generate events that are published to Redis for real-time streaming.
     """
     
     def __init__(
@@ -159,167 +157,6 @@ class AgentRunner:
                 exc_info=True
             )
             yield {"type": "error", "error": str(e)}
-    
-    async def run(self) -> AgentResponse:
-        """
-        Run workflow in non-streaming mode, collecting events and returning final response.
-        
-        Returns:
-            Final AgentResponse
-            
-        Raises:
-            Exception: If workflow completes without final response or encounters an error
-        """
-        final = None
-        
-        # Execute with trace context if enabled
-        # Pass session_id, user_id, trace_id separately to handle Command type
-        # NOTE: Langfuse context is already managed inside ai_agent_workflow_events.run_workflow()
-        # We don't need to wrap it here again - doing so can cause context detach errors on interrupt
-        if LANGFUSE_ENABLED and self.trace_context:
-            # Just pass trace context - let ai_agent_workflow_events handle Langfuse context internally
-            async for event in ai_agent_workflow_events(
-                self.request,
-                session_id=self.chat_session_id,
-                user_id=self.user_id,
-                trace_id=self.trace_id
-            ):
-                if event.get("type") == "final":
-                    final = event.get("response")
-                elif event.get("type") == "interrupt":
-                    # Interrupt is terminal - workflow paused for approval
-                    raise Exception("Workflow interrupted - requires resume")
-                elif event.get("type") == "error":
-                    raise Exception(event.get("error", "Unknown error"))
-        else:
-            async for event in ai_agent_workflow_events(
-                self.request,
-                session_id=self.chat_session_id,
-                user_id=self.user_id,
-                trace_id=self.trace_id
-            ):
-                if event.get("type") == "final":
-                    final = event.get("response")
-                elif event.get("type") == "interrupt":
-                    # Interrupt is terminal - workflow paused for approval
-                    raise Exception("Workflow interrupted - requires resume")
-                elif event.get("type") == "error":
-                    raise Exception(event.get("error", "Unknown error"))
-        
-        if final is None:
-            raise Exception("Workflow completed without final response")
-        
-        # Flush traces if enabled
-        if LANGFUSE_ENABLED:
-            flush_traces()
-        
-        return final
-    
-    async def invoke(self) -> Dict[str, Any]:
-        """
-        Invoke workflow in non-streaming mode using LangGraph's .invoke() method.
-        
-        This method is used inside Temporal activity for non-stream mode.
-        It does not generate token events, eliminating streaming overhead.
-        
-        Returns:
-            Dictionary with status and response:
-            - {"status": "completed", "response": AgentResponse} on success
-            - {"status": "approval_required", "interrupt": {...}} on interrupt
-        """
-        from app.agents.functional.workflow import ai_agent_workflow
-        from app.agents.checkpoint import get_checkpoint_config
-        from langgraph.errors import GraphInterrupt
-        
-        try:
-            # Get checkpoint config for this session
-            checkpoint_config = get_checkpoint_config(self.chat_session_id)
-            
-            # Call workflow directly with .invoke() (no streaming, no token events)
-            # NOTE: When using .invoke(), interrupts are NOT raised as GraphInterrupt exceptions.
-            # Instead, the result contains __interrupt__ key when interrupt() is called.
-            # Reference: https://docs.langchain.com/oss/python/langgraph/interrupts
-            result = ai_agent_workflow.invoke(self.request, config=checkpoint_config)
-            
-            # Check if result contains __interrupt__ (LangGraph's way of surfacing interrupts in .invoke())
-            # When interrupt() is called, .invoke() returns a dict with __interrupt__ key instead of raising GraphInterrupt
-            if isinstance(result, dict) and "__interrupt__" in result:
-                interrupt_raw = result["__interrupt__"]
-                interrupt_data = None
-                
-                # Extract interrupt value from LangGraph Interrupt object
-                # LangGraph returns __interrupt__ as a tuple: (Interrupt(value={...}, id='...'),)
-                if isinstance(interrupt_raw, tuple) and len(interrupt_raw) > 0:
-                    interrupt_obj = interrupt_raw[0]
-                    if hasattr(interrupt_obj, 'value'):
-                        interrupt_data = interrupt_obj.value
-                    elif isinstance(interrupt_obj, dict):
-                        interrupt_data = interrupt_obj.get('value', interrupt_obj)
-                    else:
-                        interrupt_data = interrupt_obj
-                elif isinstance(interrupt_raw, dict):
-                    interrupt_data = interrupt_raw.get('value', interrupt_raw)
-                elif hasattr(interrupt_raw, 'value'):
-                    interrupt_data = interrupt_raw.value
-                else:
-                    interrupt_data = interrupt_raw
-                
-                logger.info(f"[HITL] [INVOKE] Workflow interrupted during invoke (via __interrupt__): session={self.chat_session_id}, interrupt_data={interrupt_data}")
-                
-                # Flush traces even on interrupt
-                if LANGFUSE_ENABLED:
-                    flush_traces()
-                
-                return {
-                    "status": "approval_required",
-                    "interrupt": interrupt_data or {"type": "tool_approval", "session_id": self.chat_session_id, "tools": []}
-                }
-            
-            # result is AgentResponse (normal completion)
-            if result:
-                # Flush traces if enabled
-                if LANGFUSE_ENABLED:
-                    flush_traces()
-                
-                return {
-                    "status": "completed",
-                    "response": result
-                }
-            else:
-                raise Exception("Workflow completed without response")
-                
-        except GraphInterrupt as e:
-            # GraphInterrupt can still be raised in some edge cases, handle it for safety
-            logger.info(f"[INVOKE] Caught GraphInterrupt exception: {type(e)}, has_value={hasattr(e, 'value')}, has_interrupt={hasattr(e, 'interrupt')}")
-            # Interrupt occurred - workflow paused for approval
-            # Extract interrupt data from the exception
-            interrupt_data = None
-            if hasattr(e, 'value'):
-                interrupt_data = e.value
-            elif hasattr(e, 'interrupt'):
-                interrupt_data = e.interrupt
-            
-            logger.info(f"[HITL] [INVOKE] Workflow interrupted during invoke (via exception): session={self.chat_session_id}")
-            
-            # Flush traces even on interrupt
-            if LANGFUSE_ENABLED:
-                flush_traces()
-            
-            return {
-                "status": "approval_required",
-                "interrupt": interrupt_data or {"type": "tool_approval", "session_id": self.chat_session_id, "tools": []}
-            }
-        except Exception as e:
-            logger.error(
-                f"Error in AgentRunner.invoke for user {self.user_id}, session {self.chat_session_id}: {e}",
-                exc_info=True
-            )
-            
-            # Flush traces even on error
-            if LANGFUSE_ENABLED:
-                flush_traces()
-            
-            raise
     
     async def stream(self, emit: Optional[Callable[[Dict[str, Any]], None]] = None) -> AsyncIterator[Dict[str, Any]]:
         """
@@ -437,82 +274,8 @@ class AgentRunner:
 
 
 # ============================================================================
-# API Layer Functions (Stream Switch Point)
+# API Layer Functions
 # ============================================================================
-
-def execute_agent(
-    user_id: int,
-    chat_session_id: int,
-    message: str,
-    plan_steps: Optional[List[Dict[str, Any]]] = None,
-    flow: str = "main"
-) -> Dict[str, Any]:
-    """
-    Execute agent using Functional API with input message (non-streaming).
-    
-    This is the API layer switch point for non-streaming execution.
-    
-    Args:
-        user_id: User ID
-        chat_session_id: Chat session ID
-        message: User message
-        plan_steps: Optional plan steps
-        flow: Flow type
-        
-    Returns:
-        Dictionary with execution results
-    """
-    runner = AgentRunner(
-        user_id=user_id,
-        chat_session_id=chat_session_id,
-        message=message,
-        plan_steps=plan_steps,
-        flow=flow
-    )
-    
-    try:
-        logger.info(f"Executing agent for user {user_id}, session {chat_session_id}, trace: {runner.trace_id}")
-        
-        # Run in non-streaming mode
-        response = asyncio.run(runner.run())
-        
-        logger.info(f"Agent execution completed successfully. Agent: {response.agent_name}")
-        
-        result = {
-            "success": True,
-            "response": response.reply or "",
-            "agent": response.agent_name,
-            "tool_calls": response.tool_calls,
-            "trace_id": runner.trace_id,
-        }
-        
-        # Include type and plan if this is a plan_proposal response
-        if response.type == "plan_proposal":
-            result["type"] = "plan_proposal"
-            if response.plan:
-                result["plan"] = response.plan
-        
-        # Include clarification and raw_tool_outputs if present
-        if response.clarification:
-            result["clarification"] = response.clarification
-        
-        if response.raw_tool_outputs:
-            result["raw_tool_outputs"] = response.raw_tool_outputs
-        
-        return result
-    except Exception as e:
-        logger.error(
-            f"Error executing agent for user {user_id}, session {chat_session_id}: {e}",
-            exc_info=True
-        )
-        
-        return {
-            "success": False,
-            "error": str(e),
-            "response": f"I apologize, but I encountered an error: {str(e)}",
-            "trace_id": runner.trace_id,
-        }
-
 
 async def stream_agent_events_async(
     user_id: int,

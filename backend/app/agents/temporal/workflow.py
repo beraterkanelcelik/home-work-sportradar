@@ -60,11 +60,9 @@ class ChatWorkflow:
         self.processed_messages: set = set()
         # Track resume payload for interrupt resume (human-in-the-loop)
         self.resume_payload: Optional[Any] = None
-        # Store last activity result for query (non-stream mode)
-        self.last_activity_result: Optional[Dict[str, Any]] = None
     
     @workflow.signal
-    def new_message(self, message: str, plan_steps: Optional[list] = None, flow: str = "main", mode: str = "stream", run_id: Optional[str] = None, parent_message_id: Optional[int] = None) -> None:
+    def new_message(self, message: str, plan_steps: Optional[list] = None, flow: str = "main", run_id: Optional[str] = None, parent_message_id: Optional[int] = None) -> None:
         """
         Signal handler for new messages.
         
@@ -72,8 +70,7 @@ class ChatWorkflow:
             message: Message content
             plan_steps: Optional plan steps
             flow: Flow type
-            mode: Execution mode - "stream" for streaming (SSE), "non_stream" for non-streaming (API)
-            run_id: Optional correlation ID for /run polling (ensures stable dedupe identity)
+            run_id: Optional correlation ID (ensures stable dedupe identity)
             parent_message_id: Optional parent user message ID for correlation
         """
         if self.is_closing:
@@ -112,7 +109,6 @@ class ChatWorkflow:
             "message": message,
             "plan_steps": plan_steps,
             "flow": flow,
-            "mode": mode,  # Execution mode: "stream" or "non_stream"
             "run_id": run_id,  # Correlation ID
             "parent_message_id": parent_message_id,  # Parent message ID
             "_hash": message_hash,  # Store stable hash for deduplication
@@ -245,7 +241,6 @@ class ChatWorkflow:
                     "message": message_content,
                     "plan_steps": signal_data.get("plan_steps"),
                     "flow": signal_data.get("flow", "main"),
-                    "mode": signal_data.get("mode", "stream"),  # Pass mode to activity
                     "run_id": signal_data.get("run_id"),  # Pass correlation ID to activity
                     "parent_message_id": signal_data.get("parent_message_id"),  # Pass parent message ID to activity
                     "tenant_id": tenant_id,  # Use user_id as fallback
@@ -357,18 +352,6 @@ class ChatWorkflow:
                                 f"to prevent unbounded growth for session {chat_id}"
                             )
                             self.processed_messages.clear()
-                    
-                    # Store activity result with run_id for correlation (non-stream mode uses query)
-                    # This allows API to query workflow for result without waiting for completion
-                    self.last_activity_result = {
-                        "run_id": signal_data.get("run_id"),
-                        "status": result.get("status") if isinstance(result, dict) else "unknown",
-                        "response": result.get("response") if isinstance(result, dict) else None,
-                        "interrupt": result.get("interrupt") if isinstance(result, dict) else None,
-                        "error": result.get("error") if isinstance(result, dict) else None,
-                        "timestamp": workflow.now().timestamp(),
-                    }
-                    workflow.logger.info(f"[WORKFLOW] Stored activity result for query: run_id={signal_data.get('run_id')}, status={self.last_activity_result['status']} session={chat_id}")
                     
                     # Update last activity time after successful processing
                     self.last_activity_time = workflow.now().timestamp()

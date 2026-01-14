@@ -124,9 +124,8 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
     message = state.get("message", "")
     user_id = state.get("user_id")
     session_id = state.get("session_id", chat_id)
-    mode = state.get("mode", "stream")  # Execution mode: "stream" or "non_stream"
     
-    logger.info(f"[ACTIVITY_START] Starting activity for chat_id={chat_id}, mode={mode}, message_preview={message[:50] if message else '(empty)'}..., user_id={user_id}, session_id={session_id}, state_keys={list(state.keys())}")
+    logger.info(f"[ACTIVITY_START] Starting activity for chat_id={chat_id}, message_preview={message[:50] if message else '(empty)'}..., user_id={user_id}, session_id={session_id}, state_keys={list(state.keys())}")
     
     if not message:
         logger.error(f"[ACTIVITY_ERROR] No message in state for chat_id={chat_id}. State keys: {list(state.keys())}")
@@ -204,84 +203,10 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         if resume_payload:
             logger.info(f"[HITL] Injected resume_payload into AgentRunner: session={chat_id}")
         
-        # Execute based on mode
-        if mode == "non_stream":
-            # Non-streaming mode: aggregate events internally, NO Redis
-            # Uses same execute() pipeline as stream mode for consistency
-            logger.info(f"[ACTIVITY] Executing in non-stream mode: session={chat_id}")
-            
-            final_response = None
-            event_count = 0
-            
-            try:
-                async for event in runner.execute():
-                    event_count += 1
-                    
-                    # Send heartbeat periodically (every 10 events or on important events)
-                    if event_count % 10 == 0 or event.get("type") in ["final", "interrupt", "error"]:
-                        activity.heartbeat({
-                            "status": "processing",
-                            "chat_id": chat_id,
-                            "event_count": event_count,
-                            "last_event_type": event.get("type"),
-                        })
-                    
-                    if event.get("type") == "final":
-                        final_response = event.get("response")
-                        # Message is saved by save_message_task in workflow (same as stream path)
-                    elif event.get("type") == "interrupt":
-                        interrupt_data = event.get("data") or event.get("interrupt")
-                        logger.info(f"[HITL] [INTERRUPT] Workflow interrupted in non-stream mode for chat_id={chat_id}, interrupt_data={interrupt_data}")
-                        activity.heartbeat({"status": "interrupted", "chat_id": chat_id})
-                        
-                        # Import serialize_response from runner
-                        from app.agents.runner import serialize_response
-                        
-                        return {
-                            "status": "interrupted",
-                            "interrupt": interrupt_data,
-                            "run_id": state.get("run_id")  # Include for correlation
-                        }
-                    elif event.get("type") == "error":
-                        error_msg = event.get("error", "Unknown error")
-                        logger.error(f"Error in non-stream execution for chat_id={chat_id}: {error_msg}")
-                        activity.heartbeat({"status": "error", "chat_id": chat_id, "error": error_msg})
-                        return {
-                            "status": "error",
-                            "error": error_msg,
-                            "run_id": state.get("run_id")
-                        }
-                
-                # Import serialize_response from runner
-                from app.agents.runner import serialize_response
-                
-                if final_response is None:
-                    raise Exception("Workflow completed without final response")
-                
-                logger.info(f"[ACTIVITY] Non-stream execution completed: session={chat_id}")
-                
-                # Send final heartbeat
-                activity.heartbeat({"status": "completed", "chat_id": chat_id, "event_count": event_count})
-                
-                return {
-                    "status": "completed",
-                    "response": serialize_response(final_response),
-                    "run_id": state.get("run_id")  # Include for correlation
-                }
-                    
-            except Exception as e:
-                logger.error(f"Error in non-stream execution for chat_id={chat_id}: {e}", exc_info=True)
-                activity.heartbeat({"status": "error", "chat_id": chat_id, "error": str(e)})
-                return {
-                    "status": "error",
-                    "error": str(e),
-                    "run_id": state.get("run_id")
-                }
-        
         # Streaming mode: use .stream() and publish to Redis
         logger.info(f"[ACTIVITY] Executing in stream mode: session={chat_id}")
         
-        # Initialize Redis and build channel for stream mode only (reduces overhead for non-stream)
+        # Initialize Redis and build channel for streaming
         # CRITICAL: Use user_id as tenant_id if tenant_id is missing to match SSE subscription
         # SSE endpoint subscribes to chat:{user.id}:{chat_id}, so we must publish to the same channel
         tenant_id = state.get("tenant_id") or state.get("user_id")
@@ -311,7 +236,7 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         
         # Semaphore for backpressure: cap concurrent publish operations
         # Prevents unbounded in-flight tasks if publish rate > completion rate
-        # Only create for stream mode (non-stream doesn't publish)
+        # Create Redis publisher for streaming events
         PUBLISH_CONCURRENCY_LIMIT = int(os.getenv('REDIS_PUBLISH_CONCURRENCY_LIMIT', '100'))
         publish_semaphore = asyncio.Semaphore(PUBLISH_CONCURRENCY_LIMIT)
         

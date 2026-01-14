@@ -9,176 +9,12 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.core.dependencies import get_current_user, get_current_user_async
-from app.agents.runner import execute_agent
 from app.core.logging import get_logger
 from app.core.redis import get_redis_client
 from app.agents.temporal.workflow_manager import get_or_create_workflow
 from app.settings import TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE
 
 logger = get_logger(__name__)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-async def run_agent(request):
-    """
-    Run agent with input message (non-streaming, uses Temporal for durability).
-    
-    Uses hybrid response: blocks briefly for fast completions, otherwise returns 202 + fetch endpoint.
-    
-    Request body:
-    {
-        "chat_session_id": int,
-        "message": str
-    }
-    
-    Returns:
-    - 200 OK: {"status": "completed", "response": {...}} (fast completion)
-    - 202 Accepted: {"status": "approval_required", "interrupt": {...}, "approve_endpoint": "...", "fetch": "..."} (HITL needed)
-    - 202 Accepted: {"status": "running", "fetch": "..."} (still running after timeout)
-    """
-    user = await get_current_user_async(request)
-    if not user:
-        logger.warning("Unauthenticated request to run_agent endpoint")
-        return JsonResponse(
-            {'error': 'Authentication required'},
-            status=401
-        )
-    
-    try:
-        data = json.loads(request.body)
-        chat_session_id = data.get('chat_session_id')
-        message = data.get('message', '').strip()
-        plan_steps = data.get('plan_steps')
-        flow = data.get('flow', 'main')
-        
-        if not chat_session_id:
-            logger.warning(f"Missing chat_session_id in run_agent request from user {user.id}")
-            return JsonResponse(
-                {'error': 'chat_session_id is required'},
-                status=400
-            )
-        
-        # For plan execution, message can be empty
-        if flow != 'plan' and not message:
-            logger.warning(f"Empty message in run_agent request from user {user.id}")
-            return JsonResponse(
-                {'error': 'message is required'},
-                status=400
-            )
-        
-        # Generate run ID for correlation (ensures /run polling returns correct message under concurrency)
-        run_id = str(uuid.uuid4())
-        logger.info(f"Running agent (non-stream) for user {user.id}, session {chat_session_id}, run_id {run_id}, flow: {flow}")
-        
-        # Save user message first (only if not plan execution)
-        user_message_id = None
-        if flow != 'plan' and message:
-            from app.services.chat_service import add_message
-            from asgiref.sync import sync_to_async
-            try:
-                user_message = await sync_to_async(add_message)(chat_session_id, 'user', message)
-                user_message_id = user_message.id
-                logger.debug(f"Saved user message {user_message_id} before agent execution")
-            except Exception as e:
-                logger.error(f"Error saving user message: {e}", exc_info=True)
-                return JsonResponse({'error': 'Failed to save user message'}, status=500)
-        
-        # Use Temporal workflow for non-stream execution (durable, supports HITL)
-        try:
-            # Prepare initial state for workflow
-            tenant_id = str(user.id)  # Use user_id as tenant_id
-            workflow_state = {
-                "user_id": user.id,
-                "session_id": chat_session_id,
-                "message": message,
-                "plan_steps": plan_steps,
-                "flow": flow,
-                "tenant_id": tenant_id,
-                "run_id": run_id,  # Correlation ID for /run polling
-                "parent_message_id": user_message_id,  # Parent message ID for correlation
-                "org_slug": None,  # Not available in current implementation
-                "org_roles": [],  # Not available in current implementation
-                "app_roles": [],  # Not available in current implementation
-            }
-            
-            # Get or create workflow with mode="non_stream"
-            workflow_handle = await get_or_create_workflow(
-                user.id,
-                chat_session_id,
-                initial_state=workflow_state,
-                mode="non_stream"
-            )
-            logger.info(f"Using Temporal workflow {workflow_handle.id} for non-stream chat {chat_session_id}")
-            
-            # Poll workflow query for activity result (fast, in-memory, strongly consistent)
-            # Workflow query returns activity result without waiting for workflow completion
-            WAIT_TIMEOUT_SECONDS = int(os.getenv('RUN_AGENT_WAIT_TIMEOUT', '8'))
-            POLL_INTERVAL_SECONDS = 0.5  # Check query every 500ms
-            max_polls = int(WAIT_TIMEOUT_SECONDS / POLL_INTERVAL_SECONDS)
-            
-            fetch_endpoint = f"/api/chats/{chat_session_id}/messages/"
-            approve_endpoint = "/api/agent/approve-tool/"
-            
-            import time
-            
-            # Poll via workflow query (not DB, not workflow.result())
-            # Query is fast (in-memory), strongly consistent, and correlated by run_id
-            for _ in range(max_polls):
-                await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                
-                try:
-                    # Import ChatWorkflow to access query method
-                    from app.agents.temporal.workflow import ChatWorkflow
-                    last_result = await workflow_handle.query(ChatWorkflow.get_last_result)
-                except Exception as e:
-                    logger.debug(f"Query failed: {e}")
-                    continue
-                
-                # Check if this result is for our request (correlation by run_id)
-                if last_result and last_result.get("run_id") == run_id:
-                    # Verify result is recent (avoid stale results from previous requests)
-                    result_age = time.time() - last_result.get("timestamp", 0)
-                    if result_age > WAIT_TIMEOUT_SECONDS + 5:  # Allow small buffer
-                        logger.warning(f"Stale result detected: age={result_age}s, run_id={run_id}")
-                        continue  # Keep polling
-                    
-                    status = last_result.get("status")
-                    
-                    if status == "completed":
-                        return JsonResponse({
-                            "status": "completed",
-                            "response": last_result["response"]
-                        })
-                    elif status == "interrupted":
-                        return JsonResponse({
-                            "status": "approval_required",
-                            "interrupt": last_result["interrupt"],
-                            "approve_endpoint": approve_endpoint,
-                            "fetch": fetch_endpoint
-                        }, status=202)
-                    elif status == "error":
-                        return JsonResponse({
-                            "error": last_result.get("error", "Unknown error")
-                        }, status=500)
-            
-            # Timeout - still running
-            return JsonResponse({
-                "status": "running",
-                "fetch": fetch_endpoint,
-                "message": "Request still processing. Fetch from DB endpoint to get results when ready."
-            }, status=202)
-            
-        except Exception as e:
-            logger.error(f"Error in non-stream execution for user {user.id}, session {chat_session_id}: {e}", exc_info=True)
-            return JsonResponse({'error': str(e)}, status=500)
-    
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in run_agent request: {e}")
-        return JsonResponse({'error': 'Invalid JSON'}, status=400)
-    except Exception as e:
-        logger.error(f"Unexpected error in run_agent endpoint: {e}", exc_info=True)
-        return JsonResponse({'error': str(e)}, status=500)
 
 
 @csrf_exempt
@@ -311,13 +147,12 @@ async def stream_agent(request):
                                 "app_roles": [],  # Not available in current implementation
                             }
                             
-                            # Get or create workflow with mode="stream" - it will handle signaling automatically
+                            # Get or create workflow - it will handle signaling automatically
                             # Pass parent_message_id for stable dedupe (prevents same message via /stream then /run from being deduped)
                             workflow_handle = await get_or_create_workflow(
                                 user.id,
                                 chat_session_id,
-                                initial_state=workflow_state,
-                                mode="stream"
+                                initial_state=workflow_state
                             )
                             logger.info(f"Using Temporal workflow {workflow_handle.id} for chat {chat_session_id} (signal sent automatically)")
                         except Exception as e:
@@ -710,10 +545,84 @@ async def approve_tool(request):
         
         logger.info(f"[HITL] [RESUME] Resume request received: user={user.id} session={chat_session_id} resume_keys={list(resume.keys()) if isinstance(resume, dict) else 'N/A'}")
         
+        # Update database FIRST: Mark tool calls as approved/rejected in the message that was saved before interrupt
+        # This ensures the database reflects the approval decision immediately, even before workflow execution
+        # The workflow will later update status to "completed" after execution
+        from app.db.models.message import Message
+        from asgiref.sync import sync_to_async
+        approvals = resume.get("approvals", {}) if isinstance(resume, dict) else {}
+        
+        if approvals:
+            try:
+                # Find the most recent assistant message with tool_calls awaiting approval
+                # This is the message that was saved before the interrupt
+                latest_assistant_msg = await sync_to_async(
+                    lambda: Message.objects.filter(
+                        session_id=chat_session_id,
+                        role="assistant"
+                    ).order_by('-created_at').first()
+                )()
+                
+                if latest_assistant_msg:
+                    metadata = latest_assistant_msg.metadata or {}
+                    tool_calls = metadata.get("tool_calls", [])
+                    
+                    if tool_calls:
+                        # Update tool call statuses based on approval decisions
+                        updated_tool_calls = []
+                        for tc in tool_calls:
+                            tool_call_id = tc.get("id")
+                            approval_decision = approvals.get(tool_call_id, {})
+                            
+                            if approval_decision.get("approved", False):
+                                # Tool was approved - mark as approved (will be updated to "completed" after execution)
+                                updated_tc = {**tc, "status": "approved", "requires_approval": False}
+                                if "args" in approval_decision:
+                                    updated_tc["args"] = approval_decision["args"]
+                                updated_tool_calls.append(updated_tc)
+                                logger.info(f"[HITL] [DB_UPDATE] Marked tool {tc.get('name') or tc.get('tool')} as approved in message ID={latest_assistant_msg.id} session={chat_session_id}")
+                            elif tool_call_id in approvals:
+                                # Tool was explicitly rejected
+                                updated_tc = {**tc, "status": "rejected", "requires_approval": False}
+                                updated_tool_calls.append(updated_tc)
+                                logger.info(f"[HITL] [DB_UPDATE] Marked tool {tc.get('name') or tc.get('tool')} as rejected in message ID={latest_assistant_msg.id} session={chat_session_id}")
+                            else:
+                                # No decision for this tool, keep as is
+                                updated_tool_calls.append(tc)
+                        
+                        # Update message metadata with approved/rejected tool_calls
+                        metadata["tool_calls"] = updated_tool_calls
+                        latest_assistant_msg.metadata = metadata
+                        await sync_to_async(latest_assistant_msg.save)()
+                        logger.info(f"[HITL] [DB_UPDATE] Updated message ID={latest_assistant_msg.id} with approval decisions session={chat_session_id}")
+            except Exception as e:
+                logger.warning(f"[HITL] [DB_UPDATE] Failed to update message with approval decisions: {e} session={chat_session_id}", exc_info=True)
+                # Don't fail the request if DB update fails - workflow will still process
+        
         # Send resume signal to Temporal workflow (human-in-the-loop integration)
+        # Get the existing workflow handle directly (workflow should already exist from the initial message)
         try:
-            from app.agents.temporal.workflow_manager import get_or_create_workflow
-            workflow_handle = await get_or_create_workflow(user.id, chat_session_id)
+            from app.agents.temporal.workflow_manager import get_workflow_id
+            from app.core.temporal import get_temporal_client
+            client = await get_temporal_client()
+            workflow_id = get_workflow_id(user.id, chat_session_id)
+            workflow_handle = client.get_workflow_handle(workflow_id)
+            
+            # Verify workflow exists and is running
+            try:
+                description = await workflow_handle.describe()
+                if description.status.name != "RUNNING":
+                    logger.warning(f"[HITL] [RESUME] Workflow {workflow_id} is not running (status: {description.status.name})")
+                    return JsonResponse({
+                        'success': False,
+                        'error': 'Workflow is not running. Please send a new message first.'
+                    }, status=400)
+            except Exception as e:
+                logger.error(f"[HITL] [RESUME] Workflow {workflow_id} not found: {e}")
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Workflow not found. Please send a new message first.'
+                }, status=404)
             
             # Send resume signal with resume_payload
             await workflow_handle.signal(

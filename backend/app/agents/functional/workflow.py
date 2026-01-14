@@ -706,6 +706,46 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                     tc["status"] = "error"
                     tc["error"] = f"Tool execution failed - no result returned for tool_call_id={tool_call_id}"
             
+            # Update database: Mark approved tools as completed after execution
+            # This ensures the first message (saved before interrupt) reflects completed status
+            if approval_tools and current_run_id:
+                try:
+                    from app.db.models.message import Message
+                    existing_message = Message.objects.filter(
+                        session_id=current_session_id,
+                        role="assistant",
+                        metadata__run_id=current_run_id
+                    ).order_by('created_at').first()
+                    
+                    if existing_message:
+                        # Update tool_calls in the existing message with completed statuses
+                        existing_metadata = existing_message.metadata or {}
+                        existing_tool_calls = existing_metadata.get("tool_calls", [])
+                        
+                        # Update tool call statuses to match the executed tools
+                        updated_tool_calls = []
+                        for existing_tc in existing_tool_calls:
+                            tool_call_id = existing_tc.get("id")
+                            # Find matching executed tool
+                            matching_executed = next(
+                                (tc for tc in tools_to_execute if tc.get("id") == tool_call_id),
+                                None
+                            )
+                            if matching_executed:
+                                # Use the status from executed tool (completed/error)
+                                updated_tool_calls.append(matching_executed)
+                            else:
+                                # Keep original if not found (shouldn't happen)
+                                updated_tool_calls.append(existing_tc)
+                        
+                        # Update message metadata with completed tool_calls
+                        existing_metadata["tool_calls"] = updated_tool_calls
+                        existing_message.metadata = existing_metadata
+                        existing_message.save()
+                        logger.info(f"[HITL] [DB_UPDATE] Updated message ID={existing_message.id} with completed tool statuses session={current_session_id}")
+                except Exception as e:
+                    logger.warning(f"[HITL] [DB_UPDATE] Failed to update message with completed tool statuses: {e} session={current_session_id}", exc_info=True)
+            
             # Only process tool results and call agent_with_tool_results_task if we have tool results
             # If we have pending tools but no tool results, skip this step to avoid OpenAI API errors
             if tool_results:

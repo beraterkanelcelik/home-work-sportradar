@@ -913,18 +913,41 @@ def save_message_task(
             plan_steps = response.plan.get("plan", [])
             content = f"Plan proposal with {len(plan_steps)} step(s) to execute."
         
-        # Save message
-        message = add_message(
-            session_id=session_id,
-            role="assistant",
-            content=content,
-            tokens_used=response.token_usage.get("total_tokens", 0) if response.token_usage else 0,
-            metadata=metadata
-        )
+        # Check if there's an existing message with the same run_id to update instead of creating new one
+        # This prevents duplicate messages when tools are approved (initial message with awaiting_approval, then final with completed)
+        from app.db.models.message import Message
+        existing_message = None
+        if run_id:
+            try:
+                existing_message = Message.objects.filter(
+                    session_id=session_id,
+                    role="assistant",
+                    metadata__run_id=run_id
+                ).order_by('-created_at').first()
+            except Exception as e:
+                logger.warning(f"[MESSAGE_SAVE] Error checking for existing message with run_id={run_id}: {e}")
         
-        logger.info(f"[MESSAGE_SAVE] Saved assistant message ID={message.id} session={session_id} agent={response.agent_name} content_preview={content[:50]}... tokens={response.token_usage.get('total_tokens', 0) if response.token_usage else 0}")
-        
-        return True
+        if existing_message:
+            # Update existing message with final tool_calls statuses and content
+            existing_message.content = content
+            existing_message.tokens_used = response.token_usage.get("total_tokens", 0) if response.token_usage else existing_message.tokens_used
+            existing_message.metadata = metadata
+            existing_message.save()
+            logger.info(f"[MESSAGE_SAVE] Updated existing assistant message ID={existing_message.id} session={session_id} agent={response.agent_name} content_preview={content[:50]}... tokens={response.token_usage.get('total_tokens', 0) if response.token_usage else 0}")
+            return True
+        else:
+            # Save new message
+            message = add_message(
+                session_id=session_id,
+                role="assistant",
+                content=content,
+                tokens_used=response.token_usage.get("total_tokens", 0) if response.token_usage else 0,
+                metadata=metadata
+            )
+            
+            logger.info(f"[MESSAGE_SAVE] Saved new assistant message ID={message.id} session={session_id} agent={response.agent_name} content_preview={content[:50]}... tokens={response.token_usage.get('total_tokens', 0) if response.token_usage else 0}")
+            
+            return True
     except Exception as e:
         logger.error(f"Error saving message: {e}", exc_info=True)
         return False
