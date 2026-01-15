@@ -67,7 +67,9 @@ export function usePlanApproval({
 
       if (response.data.success) {
         toast.success('Plan approved - executing...')
-        console.log(`[PLAN_APPROVAL] Plan approved successfully: message=${messageId}`)
+        console.log(`[PLAN_APPROVAL] Plan approved successfully: message=${messageId}, keeping connection open for results`)
+        // Keep setExecutingPlanMessageId set - don't clear it yet
+        // It will be cleared when the stream completes
       } else {
         toast.error(response.data.error || 'Plan approval failed')
         setExecutingPlanMessageId(null)

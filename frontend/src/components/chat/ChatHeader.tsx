@@ -36,8 +36,12 @@ interface ChatHeaderProps {
   onOpenStats: () => void
   /** Callback to delete current chat */
   onDeleteChat: () => void
+  /** Callback to delete all chats */
+  onDeleteAllChats: () => void
   /** Whether current session exists */
   hasCurrentSession: boolean
+  /** Number of chat sessions */
+  sessionCount: number
   /** Messages for context usage display */
   messages: Message[]
 }
@@ -60,7 +64,9 @@ export default function ChatHeader({
   onModelChange,
   onOpenStats,
   onDeleteChat,
+  onDeleteAllChats,
   hasCurrentSession,
+  sessionCount,
   messages,
 }: ChatHeaderProps) {
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
@@ -190,6 +196,20 @@ export default function ChatHeader({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                     </svg>
                     <span>Delete chat</span>
+                  </button>
+                )}
+                {sessionCount > 0 && (
+                  <button
+                    onClick={() => {
+                      onDeleteAllChats()
+                      setHeaderMoreMenuOpen(false)
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted rounded-md transition-colors text-left text-sm text-destructive"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    <span>Delete all chats</span>
                   </button>
                 )}
               </div>

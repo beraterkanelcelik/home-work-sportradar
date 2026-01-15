@@ -2,6 +2,7 @@
 Chat service layer for business logic.
 """
 from typing import List, Dict, Any, Optional
+from django.utils import timezone
 from app.db.models.session import ChatSession
 from app.db.models.message import Message
 from app.core.logging import get_logger
@@ -13,21 +14,35 @@ def create_session(user_id: int, title: Optional[str] = None) -> ChatSession:
     """
     Create a new chat session.
     
+    Optimized to use select_related to prefetch user when needed.
+    Uses direct user_id assignment to avoid unnecessary user fetch during creation.
+    
     Args:
         user_id: User ID
         title: Optional session title
         
     Returns:
-        Created ChatSession object
+        Created ChatSession object with user prefetched
     """
     from django.contrib.auth import get_user_model
+    from django.db import transaction
     User = get_user_model()
     
-    user = User.objects.get(id=user_id)
-    session = ChatSession.objects.create(
-        user=user,
-        title=title,
-    )
+    # Use transaction.atomic() for consistency
+    with transaction.atomic():
+        # Verify user exists (minimal query with only id)
+        User.objects.only('id').get(id=user_id)
+        
+        # Create session with user_id directly (avoids fetching user object)
+        session = ChatSession.objects.create(
+            user_id=user_id,
+            title=title,
+        )
+        
+        # Prefetch user for later access (single query with select_related)
+        # This ensures session.user is available without triggering additional queries
+        session = ChatSession.objects.select_related('user').get(id=session.id)
+    
     logger.debug(f"Created chat session {session.id} for user {user_id}")
     return session
 
@@ -176,29 +191,46 @@ def add_message(session_id, role, content, tokens_used=0, metadata=None):
     Add a message to a chat session.
     Updates session and user token usage if tokens_used > 0.
     
+    Optimized to use F() expressions for atomic updates, reducing lock contention
+    and database round trips. Uses select_related to fetch user in same query.
+    
     Returns: Message object
     """
-    session = ChatSession.objects.get(id=session_id)
+    from django.db import transaction
+    from django.db.models import F
+    from django.utils import timezone
     
-    # Create message
-    message = Message.objects.create(
-        session=session,
-        role=role,
-        content=content,
-        tokens_used=tokens_used,
-        metadata=metadata or {}
-    )
-    
-    # Update session token usage and timestamp
-    if tokens_used > 0:
-        session.tokens_used += tokens_used
-        session.save(update_fields=['tokens_used', 'updated_at'])
+    # Use transaction.atomic() to ensure all operations succeed or fail together
+    # Use select_related to fetch user in same query, reducing round trips
+    with transaction.atomic():
+        # Fetch session with user in single query (select_related optimization)
+        session = ChatSession.objects.select_related('user').get(id=session_id)
         
-        # Use centralized utility function for token persistence
-        from app.account.utils import increment_user_token_usage
-        increment_user_token_usage(session.user.id, tokens_used)
-    else:
-        session.save(update_fields=['updated_at'])
+        # Create message
+        message = Message.objects.create(
+            session=session,
+            role=role,
+            content=content,
+            tokens_used=tokens_used,
+            metadata=metadata or {}
+        )
+        
+        # Update session token usage and timestamp using F() expression (atomic, reduces lock contention)
+        if tokens_used > 0:
+            # Use F() expression for atomic update - single UPDATE query, no lock contention
+            ChatSession.objects.filter(id=session_id).update(
+                tokens_used=F('tokens_used') + tokens_used,
+                updated_at=timezone.now()
+            )
+            
+            # Use centralized utility function for token persistence (also uses F() now)
+            from app.account.utils import increment_user_token_usage
+            increment_user_token_usage(session.user.id, tokens_used)
+        else:
+            # Just update timestamp if no tokens
+            ChatSession.objects.filter(id=session_id).update(
+                updated_at=timezone.now()
+            )
     
     logger.debug(f"Added message to session {session_id}: role={role}, tokens={tokens_used}")
     
@@ -216,6 +248,93 @@ def get_messages(session_id):
         QuerySet of Message objects
     """
     return Message.objects.filter(session_id=session_id).order_by('created_at')
+
+
+def bulk_add_messages(session_id: int, messages: List[Dict[str, Any]]) -> int:
+    """
+    Bulk add messages to a chat session using efficient batch operations.
+    
+    This function uses bulk_create for efficient batch inserts, reducing
+    database round trips from N individual inserts to 1 bulk insert.
+    Uses database transactions for atomicity and better performance.
+    
+    Args:
+        session_id: Chat session ID
+        messages: List of message dictionaries, each with:
+                 - role: str (user, assistant, system)
+                 - content: str
+                 - tokens_used: int (default 0)
+                 - metadata: dict (default {})
+        
+    Returns:
+        Number of messages created
+    """
+    from django.db import transaction
+    
+    try:
+        # Use a single transaction for all operations
+        with transaction.atomic():
+            # Use skip_locked=True to avoid blocking on locked rows - improves concurrency
+            # This allows other operations to proceed instead of waiting for locks
+            session = ChatSession.objects.select_for_update(skip_locked=True).get(id=session_id)
+            
+            # Prepare Message objects for bulk_create
+            message_objects = []
+            total_tokens = 0
+            
+            for msg_data in messages:
+                role = msg_data.get("role", "assistant")
+                content = msg_data.get("content", "")
+                tokens_used = msg_data.get("tokens_used", 0)
+                metadata = msg_data.get("metadata", {})
+                
+                message_objects.append(
+                    Message(
+                        session=session,
+                        role=role,
+                        content=content,
+                        tokens_used=tokens_used,
+                        metadata=metadata or {}
+                    )
+                )
+                total_tokens += tokens_used
+            
+            # Bulk create all messages in one query with optimized batch size
+            # Batch size of 500 is optimal for most PostgreSQL configurations
+            if message_objects:
+                created_messages = Message.objects.bulk_create(
+                    message_objects, 
+                    batch_size=500,  # Increased from 100 for better performance
+                    ignore_conflicts=False  # Fail on conflicts for data integrity
+                )
+                logger.info(f"Bulk created {len(created_messages)} messages for session {session_id}")
+                
+                # Update session token usage in single query (within same transaction)
+                if total_tokens > 0:
+                    # Use F() expressions for atomic updates to avoid race conditions
+                    from django.db.models import F
+                    ChatSession.objects.filter(id=session_id).update(
+                        tokens_used=F('tokens_used') + total_tokens,
+                        updated_at=timezone.now()
+                    )
+                    
+                    # Update user token usage (also atomic)
+                    from app.account.utils import increment_user_token_usage
+                    increment_user_token_usage(session.user.id, total_tokens)
+                else:
+                    session.save(update_fields=['updated_at'])
+                
+                return len(created_messages)
+            else:
+                logger.warning(f"No messages to bulk create for session {session_id}")
+                return 0
+            
+    except ChatSession.DoesNotExist:
+        logger.error(f"Session {session_id} not found for bulk_add_messages")
+        raise
+    except Exception as e:
+        logger.error(f"Error bulk adding messages to session {session_id}: {e}", exc_info=True)
+        raise
 
 
 def get_session_stats(session_id: int) -> Dict[str, Any]:

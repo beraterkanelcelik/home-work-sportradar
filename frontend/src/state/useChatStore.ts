@@ -34,8 +34,9 @@ export interface Message {
     type: string
     plan: Array<{
       action: string
-      tool: string
-      props: Record<string, any>
+      tool?: string
+      answer?: string
+      props?: Record<string, any>
       agent: string
       query: string
     }>

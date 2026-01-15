@@ -30,16 +30,55 @@ class EventCallbackHandler(BaseCallbackHandler):
         self.chain_stack = []
         self.is_supervisor_llm = False
         self.supervisor_in_stack = False
+        self.is_planner_llm = False
+        self.planner_in_stack = False
         self.agent_names = {"greeter", "search", "gmail", "config", "process"}
         self.active_tasks = {}
     
     def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs) -> None:
-        """Track LLM start to identify supervisor routing calls."""
+        """Track LLM start to identify supervisor and planner routing calls."""
         try:
-            if self.is_supervisor_llm:
+            if self.is_supervisor_llm or self.is_planner_llm:
                 return
-            
+
             run_name = kwargs.get("run_name", "")
+
+            # Check for planner context - also check prompts for planning system message
+            is_planner_context = self.planner_in_stack
+
+            # Check if any prompt contains the planning system message
+            if not is_planner_context and prompts:
+                for prompt in prompts:
+                    if "planning agent that breaks down complex tasks" in prompt.lower():
+                        is_planner_context = True
+                        self.planner_in_stack = True
+                        logger.debug("[STREAMING] Detected planner context from prompt content")
+                        break
+
+            if not is_planner_context:
+                for chain in self.chain_stack:
+                    if chain and "planner" in str(chain).lower():
+                        is_planner_context = True
+                        self.planner_in_stack = True
+                        break
+            if not is_planner_context and run_name and "planner" in run_name.lower():
+                is_planner_context = True
+                self.planner_in_stack = True
+            if not is_planner_context and self.current_chain and "planner" in str(self.current_chain).lower():
+                is_planner_context = True
+                self.planner_in_stack = True
+            if not is_planner_context and isinstance(serialized, dict):
+                serialized_str = str(serialized).lower()
+                if "planner" in serialized_str or "planneragent" in serialized_str:
+                    is_planner_context = True
+                    self.planner_in_stack = True
+
+            if is_planner_context:
+                self.is_planner_llm = True
+                logger.debug("[STREAMING] Planner LLM detected - tokens will be skipped")
+                return
+
+            # Check for supervisor context
             is_supervisor_context = self.supervisor_in_stack
             
             if not is_supervisor_context:
@@ -68,17 +107,26 @@ class EventCallbackHandler(BaseCallbackHandler):
             logger.debug(f"Error in on_llm_start: {e}")
     
     def on_llm_end(self, response, **kwargs) -> None:
-        """Reset supervisor flag."""
+        """Reset supervisor and planner flags."""
         self.is_supervisor_llm = False
+        self.is_planner_llm = False
     
     def on_llm_new_token(self, token: str, **kwargs) -> None:
-        """Capture LLM token chunks, but skip supervisor routing tokens."""
-        # Skip tokens from supervisor LLM
-        if self.is_supervisor_llm:
+        """Capture LLM token chunks, but skip supervisor and planner routing tokens."""
+        # Skip tokens from supervisor and planner LLMs
+        if self.is_supervisor_llm or self.is_planner_llm:
             return
-        
-        # Additional validation: supervisor only outputs short agent names
+
+        # Detect planning JSON tokens - if we see JSON structure with planning keys, mark as planner
         token_lower = token.strip().lower()
+        if any(key in token_lower for key in ['"requires_plan"', '"reasoning"', '"plan":', '"action":', '"props":']):
+            if not self.is_planner_llm:
+                logger.debug(f"[STREAMING] Detected planning JSON in token, marking as planner: {token[:50]}")
+                self.is_planner_llm = True
+                self.planner_in_stack = True
+            return
+
+        # Additional validation: supervisor only outputs short agent names
         if len(token_lower) <= 10 and token_lower in self.agent_names:
             if self.supervisor_in_stack or (self.current_chain and "supervisor" in str(self.current_chain).lower()):
                 return

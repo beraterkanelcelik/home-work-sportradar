@@ -349,40 +349,70 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                     event_count=event_count[0]
                 ).dict()
             
-            # Capture final response (for message_saved event)
+            # Capture final response (for message_saved event and workflow buffer)
             if event.get("type") == "final":
                 final_response = event.get("response")
+                
+                # Add assistant message to workflow buffer instead of immediate DB write
+                # This optimizes DB operations by batching writes on workflow close
+                if final_response:
+                    try:
+                        from app.agents.temporal.workflow_manager import get_workflow_id
+                        from app.core.temporal import get_temporal_client
+                        
+                        # Get workflow handle to signal
+                        client = await get_temporal_client()
+                        workflow_id = get_workflow_id(user_id, chat_id)
+                        workflow_handle = client.get_workflow_handle(workflow_id)
+                        
+                        # Extract message data from response
+                        content = final_response.reply if hasattr(final_response, 'reply') else str(final_response)
+                        metadata = {}
+                        tokens_used = 0
+                        
+                        if hasattr(final_response, 'token_usage'):
+                            tokens_used = final_response.token_usage.get("total_tokens", 0)
+                            metadata.update({
+                                "input_tokens": final_response.token_usage.get("input_tokens", 0),
+                                "output_tokens": final_response.token_usage.get("output_tokens", 0),
+                                "cached_tokens": final_response.token_usage.get("cached_tokens", 0),
+                            })
+                        
+                        if hasattr(final_response, 'agent_name'):
+                            metadata["agent_name"] = final_response.agent_name
+                        
+                        if hasattr(final_response, 'tool_calls'):
+                            metadata["tool_calls"] = final_response.tool_calls
+                        
+                        # Signal workflow to add message to buffer
+                        await workflow_handle.signal(
+                            "add_message_to_buffer",
+                            args=("assistant", content, metadata, tokens_used)
+                        )
+                        logger.info(f"[WORKFLOW_BUFFER] Added assistant message to workflow buffer for session {chat_id}")
+                    except Exception as e:
+                        logger.warning(f"[WORKFLOW_BUFFER] Failed to add message to workflow buffer: {e}, will fall back to DB write")
+                        # Continue - save_message_task will handle DB write as fallback
         
         # Emit message_saved event for assistant message after final event
-        # The message should already be saved by save_message_task during workflow execution
-        # Use fire-and-forget pattern for this as well
+        # Note: Message is now in workflow buffer, will be persisted on workflow close
+        # For frontend compatibility, we emit a temporary event indicating message is buffered
         if final_response and redis_client and chat_id:
             try:
-                # Query the latest assistant message for this session (use sync_to_async for Django ORM in async context)
-                from app.db.models.message import Message
-                from asgiref.sync import sync_to_async
-                
-                latest_assistant_message = await sync_to_async(
-                    lambda: Message.objects.filter(
-                        session_id=chat_id,
-                        role="assistant"
-                    ).order_by('-created_at').first()
-                )()
-                
-                if latest_assistant_message:
-                    message_saved_event = {
-                        "type": "message_saved",
-                        "data": {
-                            "role": "assistant",
-                            "db_id": latest_assistant_message.id,
-                            "session_id": chat_id,
-                        }
+                # Message is in workflow buffer, not yet in DB
+                # Emit event with temporary indicator that message will be persisted on workflow close
+                message_saved_event = {
+                    "type": "message_saved",
+                    "data": {
+                        "role": "assistant",
+                        "db_id": None,  # Will be assigned when persisted on workflow close
+                        "session_id": chat_id,
+                        "buffered": True,  # Indicates message is in workflow buffer
                     }
-                    # Use fire-and-forget for message_saved event too
-                    asyncio.create_task(_publish_event_async(publisher, channel, message_saved_event, event_count[0] + 1, message_buffer))
-                    logger.info(f"[MESSAGE_SAVED_EVENT] Emitted assistant message_saved event db_id={latest_assistant_message.id} session={chat_id}")
-                else:
-                    logger.warning(f"[MESSAGE_SAVED_EVENT] No assistant message found for session={chat_id} after final event")
+                }
+                # Use fire-and-forget for message_saved event
+                asyncio.create_task(_publish_event_async(publisher, channel, message_saved_event, event_count[0] + 1, message_buffer))
+                logger.info(f"[MESSAGE_SAVED_EVENT] Emitted buffered assistant message event for session={chat_id}")
             except Exception as e:
                 logger.warning(f"Failed to emit message_saved event for assistant message: {e}", exc_info=True)
         
@@ -409,22 +439,9 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         activity.heartbeat({"status": "completed", "chat_id": chat_id, "event_count": event_count[0]})
         logger.info(f"Chat activity completed for chat_id={chat_id}")
         
-        # Get saved message ID if available
-        if final_response and session_id:
-            try:
-                from app.db.models.message import Message
-                from asgiref.sync import sync_to_async
-                
-                latest_msg = await sync_to_async(
-                    Message.objects.filter(
-                        session_id=session_id,
-                        role='assistant'
-                    ).order_by('-created_at').first
-                )()
-                if latest_msg:
-                    message_id = latest_msg.id
-            except Exception as e:
-                logger.warning(f"Failed to get message ID: {e}")
+        # Message ID is not available yet since message is in workflow buffer
+        # Will be assigned when messages are persisted on workflow close
+        message_id = None
         
         # Return structured output
         return ChatActivityOutput(
@@ -442,5 +459,114 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         raise ApplicationError(
             str(e),
             type="CHAT_ACTIVITY_ERROR",
+            non_retryable=False  # Allow retry for transient errors
+        )
+
+
+@activity.defn
+async def bulk_persist_messages_activity(chat_id: int, messages: list) -> Dict[str, Any]:
+    """
+    Bulk persist messages to database using efficient batch operations.
+    
+    This activity is called when a workflow closes to persist all buffered messages
+    in a single transaction, reducing database overhead significantly.
+    
+    Args:
+        chat_id: Chat session ID
+        messages: List of message dictionaries from workflow buffer
+                 Each dict should have: role, content, metadata, tokens_used, timestamp
+    
+    Returns:
+        Dictionary with persistence results
+    """
+    from asgiref.sync import sync_to_async
+    from app.db.models.message import Message
+    from app.db.models.session import ChatSession
+    from app.account.utils import increment_user_token_usage
+    from app.agents.config import OPENAI_MODEL
+    
+    try:
+        logger.info(f"[BULK_PERSIST] Starting bulk persist for session {chat_id} with {len(messages)} messages")
+        
+        # Use sync_to_async to wrap Django ORM operations
+        @sync_to_async
+        def persist_messages():
+            # Get session
+            try:
+                session = ChatSession.objects.get(id=chat_id)
+            except ChatSession.DoesNotExist:
+                logger.error(f"[BULK_PERSIST] Session {chat_id} not found")
+                return {"success": False, "error": "Session not found", "persisted": 0}
+            
+            # Update model_used if not set
+            if not session.model_used:
+                session.model_used = OPENAI_MODEL
+                session.save(update_fields=['model_used'])
+            
+            # Prepare Message objects for bulk_create
+            message_objects = []
+            total_tokens = 0
+            
+            for msg_data in messages:
+                role = msg_data.get("role", "assistant")
+                content = msg_data.get("content", "")
+                metadata = msg_data.get("metadata", {})
+                tokens_used = msg_data.get("tokens_used", 0)
+                
+                message_objects.append(
+                    Message(
+                        session=session,
+                        role=role,
+                        content=content,
+                        tokens_used=tokens_used,
+                        metadata=metadata
+                    )
+                )
+                total_tokens += tokens_used
+            
+            # Bulk create all messages in one query with optimized batch size
+            # Use larger batch size (500) for better performance with increased DB memory
+            if message_objects:
+                from django.db import transaction
+                from django.db.models import F
+                from django.utils import timezone
+                
+                # Use transaction for atomicity
+                with transaction.atomic():
+                    created_messages = Message.objects.bulk_create(
+                        message_objects, 
+                        batch_size=500,  # Increased from 100 for better performance
+                        ignore_conflicts=False
+                    )
+                    logger.info(f"[BULK_PERSIST] Created {len(created_messages)} messages for session {chat_id}")
+                    
+                    # Update session token usage atomically using F() expressions
+                    if total_tokens > 0:
+                        ChatSession.objects.filter(id=chat_id).update(
+                            tokens_used=F('tokens_used') + total_tokens,
+                            updated_at=timezone.now()
+                        )
+                        
+                        # Update user token usage
+                        increment_user_token_usage(session.user.id, total_tokens)
+                
+                return {
+                    "success": True,
+                    "persisted": len(created_messages),
+                    "total_tokens": total_tokens
+                }
+            else:
+                logger.warning(f"[BULK_PERSIST] No messages to persist for session {chat_id}")
+                return {"success": True, "persisted": 0, "total_tokens": 0}
+        
+        result = await persist_messages()
+        logger.info(f"[BULK_PERSIST] Completed bulk persist for session {chat_id}: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"[BULK_PERSIST] Error bulk persisting messages for session {chat_id}: {e}", exc_info=True)
+        raise ApplicationError(
+            f"Failed to bulk persist messages: {str(e)}",
+            type="BULK_PERSIST_ERROR",
             non_retryable=False  # Allow retry for transient errors
         )

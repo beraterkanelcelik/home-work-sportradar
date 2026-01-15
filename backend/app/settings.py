@@ -91,8 +91,25 @@ DATABASES = {
         'NAME': os.getenv('DB_NAME', 'ai_agents_db'),
         'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', 'postgres'),
-        'HOST': os.getenv('DB_HOST', 'db'),
-        'PORT': os.getenv('DB_PORT', '5432'),
+        'HOST': os.getenv('DB_HOST', 'pgbouncer'),
+        'PORT': os.getenv('DB_PORT', '6432'),
+        # Connection pooling configuration for scalability
+        # CONN_MAX_AGE: Reuse connections for 60 seconds (optimized for PgBouncer)
+        # PgBouncer handles connection pooling, so shorter age is better
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '60')),
+        # Disable server-side cursors - required for PgBouncer transaction pooling
+        'DISABLE_SERVER_SIDE_CURSORS': True,
+        'OPTIONS': {
+            # Connection pool settings
+            'connect_timeout': 10,
+            # Note: statement_timeout removed - PgBouncer doesn't support it in connection options
+            # Timeout is handled at PostgreSQL level instead
+            # Additional optimizations for connection reuse
+            'keepalives': 1,  # Enable TCP keepalives
+            'keepalives_idle': 600,  # Start keepalives after 600s idle
+            'keepalives_interval': 30,  # Send keepalive every 30s
+            'keepalives_count': 3,  # Max keepalive probes before disconnect
+        },
     }
 }
 

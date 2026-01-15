@@ -69,6 +69,9 @@ class ChatWorkflow:
         self.resume_payload: Optional[Any] = None
         # Track last activity result for query
         self.last_activity_result: Optional[Dict[str, Any]] = None
+        # In-memory message storage (optimized to reduce DB writes)
+        # Messages stay in memory during session, persisted only on close
+        self.message_buffer: list = []
     
     @workflow.signal
     def new_message(self, message: str, plan_steps: Optional[list] = None, flow: str = "main", run_id: Optional[str] = None, parent_message_id: Optional[int] = None) -> None:
@@ -158,13 +161,51 @@ class ChatWorkflow:
     def get_last_result(self) -> Optional[Dict[str, Any]]:
         """
         Query handler to get last activity result without waiting for workflow completion.
-        
+
         Returns:
             Dictionary with activity result including run_id, status, response, interrupt, error, timestamp
             Returns None if no result is available yet
         """
         # Returns None if not set yet (handled by API polling loop)
         return self.last_activity_result
+
+    @workflow.query
+    def get_messages(self) -> list:
+        """
+        Query handler to get all messages from in-memory buffer.
+        Enables reading messages from workflow memory without DB queries.
+
+        Returns:
+            List of message dictionaries with role, content, metadata, tokens_used
+        """
+        return self.message_buffer
+
+    @workflow.signal
+    def add_message_to_buffer(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None, tokens_used: int = 0) -> None:
+        """
+        Signal handler to add message to in-memory buffer without persisting to DB.
+        Messages are persisted in bulk on workflow close.
+        Can be called from activities via workflow signal.
+
+        Args:
+            role: Message role (user, assistant, system)
+            content: Message content
+            metadata: Optional metadata dictionary
+            tokens_used: Token usage count
+        """
+        if self.is_closing:
+            workflow.logger.warning("Workflow is closing, ignoring add_message_to_buffer signal")
+            return
+        
+        message_data = {
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+            "tokens_used": tokens_used,
+            "timestamp": workflow.now().timestamp()
+        }
+        self.message_buffer.append(message_data)
+        workflow.logger.debug(f"Added message to buffer via signal: role={role}, buffer_size={len(self.message_buffer)}")
     
     @workflow.run
     async def run(
@@ -301,20 +342,50 @@ class ChatWorkflow:
                 )
                 
                 if result.get("status") == "interrupted":
-                    # Wait for resume
-                    await workflow.wait_condition(
-                        lambda: self.resume_payload is not None,
-                        timeout=timedelta(minutes=TEMPORAL_APPROVAL_TIMEOUT_MINUTES)
-                    )
-                    continue
+                    # Wait for resume with timeout
+                    try:
+                        await workflow.wait_condition(
+                            lambda: self.resume_payload is not None,
+                            timeout=timedelta(minutes=TEMPORAL_APPROVAL_TIMEOUT_MINUTES)
+                        )
+                        continue
+                    except asyncio.TimeoutError:
+                        workflow.logger.warning(f"Approval timeout after {TEMPORAL_APPROVAL_TIMEOUT_MINUTES} minutes for session {chat_id}")
+                        # Mark workflow as closing due to timeout
+                        self.is_closing = True
+                        break
                 elif result.get("status") == "completed":
                     self.last_activity_time = workflow.now().timestamp()
                     continue
         
-        workflow.logger.info(f"Chat workflow V2 closing for session {chat_id}")
+        workflow.logger.info(f"Chat workflow V2 closing for session {chat_id}, persisting {len(self.message_buffer)} messages to DB")
+
+        # Persist all buffered messages to database in bulk before closing
+        if self.message_buffer:
+            try:
+                # Import the activity for bulk persisting
+                from app.agents.temporal.activity import bulk_persist_messages_activity
+
+                await workflow.execute_activity(
+                    bulk_persist_messages_activity,
+                    args=[chat_id, self.message_buffer],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=10),
+                        backoff_coefficient=2.0
+                    )
+                )
+                workflow.logger.info(f"Successfully persisted {len(self.message_buffer)} messages for session {chat_id}")
+            except Exception as e:
+                workflow.logger.error(f"Failed to persist messages for session {chat_id}: {e}")
+                # Don't fail workflow close if persistence fails - messages are in checkpoint
+
         return {
             "status": "closed",
             "chat_id": chat_id,
             "reason": "inactivity_timeout" if self.is_closing else "normal",
-            "version": "v2"
+            "version": "v2",
+            "messages_persisted": len(self.message_buffer)
         }

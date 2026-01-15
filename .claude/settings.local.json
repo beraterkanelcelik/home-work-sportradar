@@ -12,7 +12,8 @@
       "Bash(curl:*)",
       "Bash(docker ps:*)",
       "Bash(docker exec django-backend bash -c \"env | grep LANGFUSE\")",
-      "Bash(docker exec:*)"
+      "Bash(docker exec:*)",
+      "Bash(python manage.py check:*)"
     ]
   }
 }

@@ -115,7 +115,7 @@ class TestConcurrentUsers(TransactionTestCase):
         self.users: List[User] = []
         self.sessions: List[ChatSession] = []
     
-    def test_concurrent_session_creation(self, num_users: int = 50):
+    def test_concurrent_session_creation(self, num_users: int = 100):
         """Test creating sessions concurrently."""
         print(f"\nTesting concurrent session creation with {num_users} users...")
         
@@ -153,7 +153,7 @@ class TestConcurrentUsers(TransactionTestCase):
         print(f"Mean time: {stats['mean']:.3f}s, P95: {stats['p95']:.3f}s")
         self.metrics.print_report()
     
-    def test_concurrent_messages(self, num_messages: int = 100):
+    def test_concurrent_messages(self, num_messages: int = 1000):
         """Test adding messages concurrently."""
         print(f"\nTesting concurrent message creation with {num_messages} messages...")
         
@@ -209,33 +209,40 @@ class TestRedisPubSubPerformance(TransactionTestCase):
         """Test Redis publish throughput (sync wrapper for async test)."""
         asyncio.run(self._test_redis_publish_throughput_async(num_messages))
     
-    async def _test_redis_publish_throughput_async(self, num_messages: int = 1000):
+    def test_redis_publish_throughput(self, num_messages: int = 10000):
+        """Test Redis publish throughput (sync wrapper for async test)."""
+        asyncio.run(self._test_redis_publish_throughput_async(num_messages))
+    
+    async def _test_redis_publish_throughput_async(self, num_messages: int = 10000):
         """Test Redis publish throughput."""
         print(f"\nTesting Redis publish throughput with {num_messages} messages...")
         
         redis_client = await get_redis_client()
-        channel = "test:load:throughput"
+        channel = f"test:load:throughput:{int(time.time())}"
         
         # Warm up
         await redis_client.publish(channel, json.dumps({"type": "warmup"}).encode())
         await asyncio.sleep(0.1)
         
-        # Publish messages
+        # Publish messages in batches to avoid overwhelming
         start_time = time.time()
-        tasks = []
-        for i in range(num_messages):
-            message = json.dumps({
-                "type": "test",
-                "data": {"id": i, "content": f"Message {i}"}
-            }).encode()
-            tasks.append(redis_client.publish(channel, message))
+        batch_size = 1000
+        successful = 0
         
-        # Wait for all publishes
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for batch_start in range(0, num_messages, batch_size):
+            batch_end = min(batch_start + batch_size, num_messages)
+            tasks = []
+            for i in range(batch_start, batch_end):
+                message = json.dumps({
+                    "type": "test",
+                    "data": {"id": i, "content": f"Message {i}"}
+                }).encode()
+                tasks.append(redis_client.publish(channel, message))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            successful += sum(1 for r in results if not isinstance(r, Exception))
+        
         total_time = time.time() - start_time
-        
-        # Calculate metrics
-        successful = sum(1 for r in results if not isinstance(r, Exception))
         throughput = successful / total_time if total_time > 0 else 0
         
         print(f"Published {successful}/{num_messages} messages in {total_time:.3f}s")
@@ -294,7 +301,7 @@ class TestRedisPubSubPerformance(TransactionTestCase):
         
         self.metrics.print_report()
     
-    def test_concurrent_channels(self, num_channels: int = 50):
+    def test_concurrent_channels(self, num_channels: int = 200):
         """Test concurrent Redis channels (sync wrapper for async test)."""
         asyncio.run(self._test_concurrent_channels_async(num_channels))
     
@@ -361,7 +368,7 @@ class TestTemporalWorkflowScalability(TransactionTestCase):
             password='testpass123'
         )
     
-    def test_concurrent_workflow_creation(self, num_workflows: int = 20):
+    def test_concurrent_workflow_creation(self, num_workflows: int = 100):
         """Test creating workflows concurrently (sync wrapper for async test)."""
         # Create sessions in sync context first
         sessions = [create_session(self.user.id, f"Workflow Test {i}") for i in range(num_workflows)]
@@ -408,7 +415,7 @@ class TestTemporalWorkflowScalability(TransactionTestCase):
             
             self.assertGreater(successful, num_workflows * 0.95, "At least 95% should succeed")
     
-    def test_workflow_signal_throughput(self, num_signals: int = 100):
+    def test_workflow_signal_throughput(self, num_signals: int = 1000):
         """Test sending signals to workflows (sync wrapper for async test)."""
         # Create session in sync context first
         session = create_session(self.user.id, "Signal Test")

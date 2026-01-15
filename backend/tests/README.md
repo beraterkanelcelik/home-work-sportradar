@@ -39,6 +39,14 @@ This directory contains comprehensive test suite for the Agent Playground applic
   - **TestAPILoad**: Concurrent API request handling
   - **TestStressScenarios**: High concurrency stress tests (100+ users, 1000+ messages)
   - **MetricsCollector**: Performance metrics collection and reporting (mean, median, P95, P99)
+- **test_scalability_levels.py**: Incremental scalability tests with progressive load levels:
+  - **Level 1**: 100 users, 1000 concurrent operations
+  - **Level 2**: 200 users, 2000 concurrent operations
+  - **Level 3**: 500 users, 5000 concurrent operations
+  - **Level 4**: 1000 users, 10000 concurrent operations
+  - **Level 5**: 2000 users, 20000 concurrent operations
+  - **TestScalabilityLevels**: Runs all levels and provides scalability comparison
+  - **TestIndividualLevels**: Individual level tests for targeted testing
 - **benchmark_runner.py**: Standalone benchmark runner script
 - **README_BENCHMARKS.md**: Detailed documentation for load/stress tests
 
@@ -171,6 +179,15 @@ docker-compose exec backend python manage.py test tests.test_load_stress.TestRed
 ### Run benchmark script:
 ```bash
 docker-compose exec backend python tests/benchmark_runner.py
+```
+
+### Run scalability level tests:
+```bash
+# Run all levels (1-5)
+docker-compose exec backend python manage.py test tests.test_scalability_levels.TestScalabilityLevels.test_all_levels
+
+# Run specific level
+docker-compose exec backend python manage.py test tests.test_scalability_levels.TestIndividualLevels.test_level_1
 ```
 
 ## Test Patterns

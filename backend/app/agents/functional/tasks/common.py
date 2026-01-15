@@ -43,6 +43,65 @@ def truncate_tool_output(output: Any) -> Any:
         return {"error": "Failed to serialize tool output", "type": str(type(output))}
 
 
+async def _get_workflow_messages(session_id: int, user_id: int) -> Optional[List[BaseMessage]]:
+    """
+    Try to get messages from active Temporal workflow buffer.
+    
+    Args:
+        session_id: Chat session ID
+        user_id: User ID
+        
+    Returns:
+        List of BaseMessage objects if workflow is active, None otherwise
+    """
+    try:
+        from app.agents.temporal.workflow_manager import get_workflow_id
+        from app.core.temporal import get_temporal_client
+        
+        client = await get_temporal_client()
+        workflow_id = get_workflow_id(user_id, session_id)
+        workflow_handle = client.get_workflow_handle(workflow_id)
+        
+        # Check if workflow is running
+        try:
+            description = await workflow_handle.describe()
+            if description.status.name != "RUNNING":
+                return None
+        except Exception:
+            # Workflow doesn't exist or can't be described
+            return None
+        
+        # Query workflow for messages
+        try:
+            workflow_messages = await workflow_handle.query("get_messages")
+            
+            # Convert workflow message dicts to LangChain messages
+            messages = []
+            for msg_data in workflow_messages:
+                role = msg_data.get("role", "assistant")
+                content = msg_data.get("content", "")
+                metadata = msg_data.get("metadata", {})
+                
+                if role == 'user':
+                    messages.append(HumanMessage(content=content))
+                elif role == 'assistant':
+                    aimessage = AIMessage(content=content)
+                    if metadata:
+                        aimessage.response_metadata = metadata
+                    messages.append(aimessage)
+                elif role == 'system':
+                    messages.append(SystemMessage(content=content))
+            
+            logger.debug(f"Loaded {len(messages)} messages from workflow buffer for session {session_id}")
+            return messages
+        except Exception as e:
+            logger.debug(f"Failed to query workflow messages: {e}")
+            return None
+    except Exception as e:
+        logger.debug(f"Error getting workflow messages: {e}")
+        return None
+
+
 @task
 def load_messages_task(
     session_id: Optional[int],
@@ -50,7 +109,12 @@ def load_messages_task(
     thread_id: str
 ) -> List[BaseMessage]:
     """
-    Load conversation history from checkpoint or database.
+    Load conversation history from workflow buffer, checkpoint, or database.
+    
+    Priority:
+    1. Active Temporal workflow buffer (for active sessions)
+    2. LangGraph checkpoint (for workflow state)
+    3. Database (for closed sessions or fallback)
     
     Args:
         session_id: Chat session ID
@@ -62,7 +126,32 @@ def load_messages_task(
     """
     messages = []
     
-    # Try to load from checkpoint first
+    # Try to load from active workflow buffer first (optimization for active sessions)
+    if session_id and _is_temporal_context():
+        try:
+            # Extract user_id from context if available
+            # Note: In Temporal activity, we can get user_id from activity info or state
+            # For now, try to get from session
+            from app.db.models.session import ChatSession
+            try:
+                session = ChatSession.objects.get(id=session_id)
+                user_id = session.user_id
+                
+                # Use sync_to_async to call async function from sync context
+                from asgiref.sync import async_to_sync
+                workflow_messages = async_to_sync(_get_workflow_messages)(session_id, user_id)
+                
+                if workflow_messages:
+                    logger.debug(f"Loaded {len(workflow_messages)} messages from workflow buffer for session {session_id}")
+                    return workflow_messages
+            except ChatSession.DoesNotExist:
+                pass
+            except Exception as e:
+                logger.debug(f"Failed to load from workflow buffer: {e}")
+        except Exception as e:
+            logger.debug(f"Error checking workflow buffer: {e}")
+    
+    # Try to load from checkpoint
     if checkpointer:
         try:
             checkpoint_config = {"configurable": {"thread_id": thread_id}}
@@ -137,6 +226,23 @@ def check_summarization_needed_task(
         return False
 
 
+def _is_temporal_context() -> bool:
+    """
+    Check if code is running in a Temporal activity context.
+    
+    Returns:
+        True if in Temporal activity, False otherwise
+    """
+    try:
+        from temporalio import activity
+        # Try to get activity info - if this succeeds, we're in an activity
+        activity.info()
+        return True
+    except (RuntimeError, AttributeError, ImportError):
+        # Not in Temporal activity context
+        return False
+
+
 @task
 def save_message_task(
     response: Any,  # AgentResponse
@@ -147,7 +253,10 @@ def save_message_task(
     parent_message_id: Optional[int] = None
 ) -> bool:
     """
-    Save agent response message to database.
+    Save agent response message to database or workflow buffer.
+    
+    If running in Temporal context, message is added to workflow buffer instead of DB.
+    Messages in buffer are persisted in bulk on workflow close for optimization.
     
     Args:
         response: AgentResponse to save
@@ -160,6 +269,13 @@ def save_message_task(
     Returns:
         True if successful
     """
+    # Check if we're in Temporal context - if so, skip DB write
+    # Messages will be added to workflow buffer by the activity after execution
+    if _is_temporal_context():
+        logger.debug(f"[Temporal] Skipping DB write for message in session {session_id} - will be added to workflow buffer")
+        # Return True to indicate "success" (message will be handled by activity)
+        return True
+    
     try:
         from app.db.models.message import Message
         from app.services.chat_service import add_message

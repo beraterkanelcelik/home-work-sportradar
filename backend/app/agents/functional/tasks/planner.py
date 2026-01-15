@@ -28,7 +28,8 @@ For single-step tasks or simple queries, return {"requires_plan": false}.
 For multi-step tasks, break them down into a sequence of actions. Each step should specify:
 - action: "tool" (execute a tool) or "answer" (provide direct response)
 - tool: tool name (if action=tool)
-- props: tool arguments as JSON object
+- answer: answer description (if action=answer)
+- props: tool arguments as JSON object (empty {} if no arguments)
 - agent: which agent should execute this step
 - query: context/description for the agent
 
@@ -47,6 +48,7 @@ Output ONLY valid JSON in this exact format:
     {
       "action": "answer",
       "answer": "Provide synthesis or final response",
+      "props": {},
       "agent": "greeter",
       "query": "Synthesize the results"
     }
@@ -125,7 +127,13 @@ def analyze_and_plan(
         logger.debug(f"[PLANNING] Invoking planning agent with {len(messages)} messages")
 
         # Invoke agent to get plan
-        response = planning_agent.invoke(planning_messages, config=config)
+        # IMPORTANT: Remove callbacks to prevent streaming during planning
+        # Planning should be silent - only the final plan proposal should be shown to user
+        planning_config = {**config} if config else {}
+        if 'callbacks' in planning_config:
+            planning_config['callbacks'] = []  # Disable streaming callbacks
+
+        response = planning_agent.invoke(planning_messages, config=planning_config)
 
         # Parse structured output from response
         if hasattr(response, 'content'):

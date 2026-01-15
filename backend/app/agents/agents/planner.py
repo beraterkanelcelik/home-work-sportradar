@@ -52,6 +52,11 @@ For multi-step tasks, break them down into a sequence of actions where each step
 - Which agent should handle the step
 - Context for the agent
 
+CRITICAL: You MUST output ONLY valid JSON with no additional text, explanation, or markdown formatting.
+Do NOT wrap your response in markdown code blocks.
+Do NOT add any text before or after the JSON.
+Output ONLY the raw JSON object.
+
 Be concise and precise in your planning. Focus on the essential steps needed to complete the task."""
 
     def get_tools(self) -> List[BaseTool]:

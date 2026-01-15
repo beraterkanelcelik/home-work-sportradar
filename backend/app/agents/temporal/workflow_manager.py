@@ -9,7 +9,7 @@ if not hasattr(django, 'apps') or not django.apps.apps.ready:
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')
     django.setup()
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import timedelta
 from temporalio.client import Client, WorkflowHandle
 from temporalio.common import WorkflowIDReusePolicy
@@ -33,6 +33,80 @@ def get_workflow_id(user_id: int, session_id: int) -> str:
         Workflow ID string
     """
     return f"chat-{user_id}-{session_id}"
+
+
+async def add_user_message_to_buffer(user_id: int, session_id: int, message: str) -> bool:
+    """
+    Add user message to workflow buffer via signal.
+    
+    Args:
+        user_id: User ID
+        session_id: Chat session ID
+        message: User message content
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        client = await get_temporal_client()
+        workflow_id = get_workflow_id(user_id, session_id)
+        workflow_handle = client.get_workflow_handle(workflow_id)
+        
+        # Signal workflow to add user message to buffer
+        await workflow_handle.signal(
+            "add_message_to_buffer",
+            args=("user", message, {}, 0)
+        )
+        logger.debug(f"[WORKFLOW_BUFFER] Added user message to workflow buffer for session {session_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"[WORKFLOW_BUFFER] Failed to add user message to workflow buffer: {e}")
+        return False
+
+
+async def get_workflow_messages(user_id: int, session_id: int) -> Optional[List[Dict[str, Any]]]:
+    """
+    Query active Temporal workflow for messages from in-memory buffer.
+    
+    This enables reading messages from workflow memory without DB queries
+    for active sessions, significantly improving read performance.
+    
+    Args:
+        user_id: User ID
+        session_id: Chat session ID
+        
+    Returns:
+        List of message dictionaries if workflow is active, None otherwise
+        Each dict has: role, content, metadata, tokens_used, timestamp
+    """
+    try:
+        client = await get_temporal_client()
+        workflow_id = get_workflow_id(user_id, session_id)
+        workflow_handle = client.get_workflow_handle(workflow_id)
+        
+        # Check if workflow is running
+        try:
+            description = await workflow_handle.describe()
+            if description.status.name != "RUNNING":
+                logger.debug(f"Workflow {workflow_id} is not running (status: {description.status.name})")
+                return None
+        except Exception as e:
+            # Workflow doesn't exist or can't be described
+            logger.debug(f"Workflow {workflow_id} not found or cannot be described: {e}")
+            return None
+        
+        # Query workflow for messages
+        try:
+            messages = await workflow_handle.query("get_messages")
+            logger.debug(f"Retrieved {len(messages)} messages from workflow buffer for session {session_id}")
+            return messages
+        except Exception as e:
+            logger.warning(f"Failed to query workflow messages for session {session_id}: {e}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"Error getting workflow messages for session {session_id}: {e}")
+        return None
 
 
 async def get_or_create_workflow(

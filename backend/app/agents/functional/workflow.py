@@ -2,6 +2,8 @@
 Main workflow entrypoint for LangGraph Functional API.
 """
 import asyncio
+import threading
+import time
 from functools import lru_cache
 from typing import Optional, List, Dict, Any, AsyncIterator, Union
 from langgraph.func import entrypoint
@@ -42,48 +44,100 @@ def build_db_url() -> str:
     )
 
 
-@lru_cache(maxsize=1)
-def get_sync_checkpointer() -> PostgresSaver:
-    """
-    Get cached sync checkpointer with long-lived connection.
+_sync_checkpointer: Optional[PostgresSaver] = None
+_checkpointer_lock = threading.Lock()
 
+
+def get_sync_checkpointer() -> Optional[PostgresSaver]:
+    """
+    Get cached sync checkpointer with long-lived connection (lazy initialization).
+    
     Creates a PostgresSaver with a persistent connection for the lifetime of the process.
-    @lru_cache ensures the instance is created once and reused.
+    Uses lazy initialization to avoid connecting at import time (database may not be ready).
+    Thread-safe singleton pattern ensures only one connection is created.
+    
+    Returns None if database is not available (allows module to import).
 
     Returns:
-        PostgresSaver instance with persistent connection
+        PostgresSaver instance with persistent connection, or None if database unavailable
     """
-    try:
-        from psycopg import Connection
-
-        db_url = build_db_url()
-        # Create a long-lived connection with autocommit enabled
-        # This is the recommended approach for persistent checkpointers
-        conn = Connection.connect(db_url, autocommit=True, prepare_threshold=0)
-
-        # Create PostgresSaver with the connection
-        checkpointer = PostgresSaver(conn)
-
-        # Initialize database tables (required by LangGraph)
-        # This is safe to call multiple times - it only creates tables if they don't exist
+    global _sync_checkpointer
+    
+    if _sync_checkpointer is not None:
+        return _sync_checkpointer
+    
+    with _checkpointer_lock:
+        # Double-check pattern
+        if _sync_checkpointer is not None:
+            return _sync_checkpointer
+        
         try:
-            checkpointer.setup()
-            logger.info("Checkpointer tables initialized successfully")
-        except Exception as e:
-            # Tables may already exist, or there might be a connection issue
-            logger.warning(f"Checkpointer setup warning (tables may already exist): {e}")
+            from psycopg import Connection
 
-        logger.info("Checkpointer created successfully")
-        return checkpointer
-    except Exception as e:
-        logger.error(f"Failed to create checkpointer: {e}", exc_info=True)
-        raise
+            db_url = build_db_url()
+            # Create a long-lived connection with autocommit enabled
+            # This is the recommended approach for persistent checkpointers
+            # Retry connection with exponential backoff if database isn't ready
+            max_retries = 5
+            retry_delay = 1.0
+            
+            conn = None
+            for attempt in range(max_retries):
+                try:
+                    conn = Connection.connect(db_url, autocommit=True, prepare_threshold=0, connect_timeout=2)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.debug(f"Failed to connect to database (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s: {e}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        # On final failure, log but don't raise - allows module to import
+                        logger.debug(f"Database not available at import time, checkpointer will be created lazily on first use: {e}")
+                        return None
+            
+            if conn is None:
+                return None
+
+            # Create PostgresSaver with the connection
+            checkpointer = PostgresSaver(conn)
+
+            # Initialize database tables (required by LangGraph)
+            # This is safe to call multiple times - it only creates tables if they don't exist
+            try:
+                checkpointer.setup()
+                logger.info("Checkpointer tables initialized successfully")
+            except Exception as e:
+                # Tables may already exist, or there might be a connection issue
+                logger.warning(f"Checkpointer setup warning (tables may already exist): {e}")
+
+            logger.info("Checkpointer created successfully")
+            _sync_checkpointer = checkpointer
+            return checkpointer
+        except Exception as e:
+            # Log error but return None to allow module import
+            logger.warning(f"Failed to create checkpointer (will retry on first use): {e}")
+            return None
+
+
+def _get_or_create_checkpointer() -> PostgresSaver:
+    """
+    Get checkpointer, creating it if it doesn't exist.
+    Raises exception if database is unavailable.
+    """
+    checkpointer = get_sync_checkpointer()
+    if checkpointer is None:
+        # Try one more time - database might be ready now
+        checkpointer = get_sync_checkpointer()
+        if checkpointer is None:
+            raise RuntimeError("Database checkpointer unavailable - database may not be ready")
+    return checkpointer
 
 
 # For async workflows (if needed in the future)
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-_checkpointer_lock = asyncio.Lock()
+_async_checkpointer_lock = asyncio.Lock()
 _async_checkpointer: Optional[AsyncPostgresSaver] = None
 
 
@@ -97,7 +151,7 @@ async def get_async_checkpointer() -> AsyncPostgresSaver:
     global _async_checkpointer
     
     if _async_checkpointer is None:
-        async with _checkpointer_lock:
+        async with _async_checkpointer_lock:
             if _async_checkpointer is None:
                 db_url = build_db_url()
                 # Create async checkpointer with connection pool
@@ -327,7 +381,20 @@ def request_plan_approval(plan: Dict[str, Any], session_id: int) -> Dict[str, An
     return decision or {"approved": False}
 
 
-@entrypoint(checkpointer=get_sync_checkpointer())
+# Use lazy checkpointer initialization - only connect when workflow is actually invoked
+# This prevents connection attempts at import time when database may not be ready
+# LangGraph's entrypoint accepts checkpointer=None (no persistence), so we can safely pass None
+# and create the checkpointer on first workflow invocation
+_lazy_checkpointer = None
+try:
+    _lazy_checkpointer = get_sync_checkpointer()
+    if _lazy_checkpointer is None:
+        logger.debug("Checkpointer not available at import time (database may not be ready), will be created on first use")
+except Exception as e:
+    logger.debug(f"Checkpointer creation deferred (database may not be ready): {e}")
+
+# LangGraph accepts checkpointer=None - it just means no persistence until checkpointer is created
+@entrypoint(checkpointer=_lazy_checkpointer)
 def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentResponse:
     """
     Main entrypoint for AI agent workflow using Functional API.
@@ -409,7 +476,8 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
         # and skip re-invoking the agent if they exist
         
         # Get checkpointer instance first (needed for both paths)
-        checkpointer = get_sync_checkpointer()
+        # Create lazily if not already created (database might not have been ready at import time)
+        checkpointer = _get_or_create_checkpointer()
         
         # Extract session_id - from request or from resume payload
         if isinstance(request, Command):
@@ -539,24 +607,8 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                             "plan_total": len(plan_steps),
                         }
 
-                        # Save plan proposal message BEFORE interrupt
-                        if current_session_id:
-                            save_message_task(
-                                response=AgentResponse(
-                                    type="plan_proposal",
-                                    plan=plan_data,
-                                    agent_name="planner",
-                                    reply=plan_analysis.get("reasoning", "I've created a plan for this task.")
-                                ),
-                                session_id=current_session_id,
-                                user_id=current_user_id,
-                                tool_calls=[],
-                                run_id=current_run_id,
-                                parent_message_id=current_parent_message_id
-                            ).result()
-                            logger.info(f"[PLANNING] Saved plan proposal message to database")
-
-                        # Request plan approval via interrupt()
+                        # Request plan approval via interrupt() - don't save to DB yet
+                        # Following tool approval pattern: send interrupt, frontend handles UI, save after approval
                         approval = request_plan_approval(plan_data, current_session_id or 0)
 
                         if not approval.get("approved"):
@@ -1119,16 +1171,16 @@ def extract_interrupt_value(interrupt_raw: Any) -> Dict[str, Any]:
     if isinstance(interrupt_raw, dict):
         if 'value' in interrupt_raw:
             return interrupt_raw['value']
-        elif interrupt_raw.get('type') == 'tool_approval':
+        elif interrupt_raw.get('type') in ('tool_approval', 'plan_approval'):
             return interrupt_raw
-    
+
     # Handle list format (serialized tuple)
     if isinstance(interrupt_raw, list) and len(interrupt_raw) > 0:
         first_item = interrupt_raw[0]
         if isinstance(first_item, dict):
             if 'value' in first_item:
                 return first_item['value']
-            elif first_item.get('type') == 'tool_approval':
+            elif first_item.get('type') in ('tool_approval', 'plan_approval'):
                 return first_item
     
     # Fallback: return raw data if we couldn't extract value
@@ -1308,8 +1360,12 @@ def _execute_plan_workflow(
 
                 try:
                     # Execute tool
+                    # Generate UUID-based tool_call_id (required by LangChain AIMessage)
+                    import uuid
+                    tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
+
                     logger.info(f"[PLAN_EXEC] Executing tool: {tool_name} with agent {agent_name}")
-                    tool_calls = [{"name": tool_name, "args": tool_args}]
+                    tool_calls = [{"id": tool_call_id, "name": tool_name, "args": tool_args}]
                     tool_results = execute_tools(
                         tool_calls=tool_calls,
                         user_id=request.user_id,
@@ -1338,20 +1394,27 @@ def _execute_plan_workflow(
                             "output": truncate_tool_output(tool_result.output),
                         })
 
-                        # Add tool result as ToolMessage
-                        # Generate proper tool_call_id (consistent with main workflow UUID-based approach)
-                        import uuid
-                        tool_call_id = tool_result.tool_call_id
-                        if not tool_call_id:
-                            # Generate UUID-based ID (consistent with main workflow pattern)
-                            tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
+                        # Add AIMessage with tool_calls (required by OpenAI API)
+                        # Then add ToolMessage with results
+                        # This follows the proper message sequence: AIMessage (with tool_calls) -> ToolMessage
+                        from langchain_core.messages import AIMessage
+
+                        ai_msg_with_tool_calls = AIMessage(
+                            content="",
+                            tool_calls=[{
+                                "name": tool_result.tool,
+                                "args": tool_result.args,
+                                "id": tool_call_id
+                            }]
+                        )
 
                         tool_msg = ToolMessage(
                             content=str(tool_result.output) if tool_result.output else tool_result.error,
                             tool_call_id=tool_call_id,
                             name=tool_result.tool
                         )
-                        messages = messages + [tool_msg]
+
+                        messages = messages + [ai_msg_with_tool_calls, tool_msg]
 
                         # Post-process with agent
                         if tool_result.output is not None:

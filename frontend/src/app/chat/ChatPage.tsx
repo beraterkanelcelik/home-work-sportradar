@@ -50,6 +50,7 @@ import ChatInput from '@/components/chat/ChatInput'
 import StatsDialog from '@/components/chat/StatsDialog'
 import DeleteDialogs from '@/components/chat/DeleteDialogs'
 import { useToolApproval } from '@/hooks/useToolApproval'
+import { usePlanApproval } from '@/hooks/usePlanApproval'
 
 
 export default function ChatPage() {
@@ -317,7 +318,7 @@ export default function ChatPage() {
           currentSession.id,
           content,
           token,
-          (event: StreamEvent) => {
+          async (event: StreamEvent) => {
             const eventType = event.type
             eventTypeCounts[eventType] = (eventTypeCounts[eventType] || 0) + 1
             
@@ -699,7 +700,9 @@ export default function ChatPage() {
               // Extract interrupt payload - handle multiple formats from backend
               const interruptData = event.data || event.interrupt
               let interruptValue: any = null
-              
+
+              console.log(`[HITL] [DEBUG] Raw interrupt data:`, interruptData, `isArray=${Array.isArray(interruptData)} type=${typeof interruptData}`)
+
               // Handle different interrupt data formats:
               // 1. Array format: [{value: {...}, resumable: true, ns: [...]}]
               // 2. Tuple format: (Interrupt(value={...}, id='...'),) - Python tuple serialized
@@ -708,35 +711,103 @@ export default function ChatPage() {
                 if (Array.isArray(interruptData) && interruptData.length > 0) {
                   // Array format - extract value from first element
                   const firstItem = interruptData[0]
+                  console.log(`[HITL] [DEBUG] Array format, firstItem:`, firstItem)
                   if (firstItem?.value) {
                     interruptValue = firstItem.value
-                  } else if (firstItem?.type === 'tool_approval') {
+                    console.log(`[HITL] [DEBUG] Extracted from firstItem.value:`, interruptValue)
+                  } else if (firstItem?.type === 'tool_approval' || firstItem?.type === 'plan_approval') {
                     // Direct value in array
                     interruptValue = firstItem
+                    console.log(`[HITL] [DEBUG] Using firstItem directly (type=${firstItem?.type}):`, interruptValue)
                   }
                 } else if (typeof interruptData === 'object') {
                   // Direct object - could be Interrupt object with .value or direct payload
+                  console.log(`[HITL] [DEBUG] Object format, has value=${!!interruptData.value} type=${interruptData.type}`)
                   if (interruptData.value) {
                     interruptValue = interruptData.value
-                  } else if (interruptData.type === 'tool_approval') {
+                    console.log(`[HITL] [DEBUG] Extracted from interruptData.value:`, interruptValue)
+                  } else if (interruptData.type === 'tool_approval' || interruptData.type === 'plan_approval') {
                     interruptValue = interruptData
+                    console.log(`[HITL] [DEBUG] Using interruptData directly (type=${interruptData.type}):`, interruptValue)
                   }
                 }
               }
+
+              console.log(`[HITL] [DEBUG] Final interruptValue:`, interruptValue)
               
-              if (interruptValue && interruptValue.type === 'tool_approval') {
+              if (interruptValue && interruptValue.type === 'plan_approval') {
+                // Plan approval interrupt - follows same pattern as tool approval
+                // Backend sends: { type: "plan_approval", plan: { type: "plan_proposal", plan: [...], plan_index: 0, plan_total: X } }
+                const planData = interruptValue.plan
+
+                console.log(`[HITL] [PLAN_APPROVAL] Received plan approval interrupt:`, planData)
+
+                // Validate plan data structure
+                if (!planData || !planData.plan || !Array.isArray(planData.plan)) {
+                  console.error(`[HITL] [PLAN_APPROVAL] Invalid plan data structure:`, planData)
+                  return
+                }
+
+                // Mark message as ready to show plan (even though stream isn't complete)
+                setStreamComplete(prev => new Set(prev).add(assistantMessageId))
+
+                // Update/create assistant message with plan data
+                set((state: { messages: Message[] }) => {
+                  let currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+
+                  // Create assistant message if it doesn't exist
+                  if (!currentMessage) {
+                    console.log(`[HITL] [PLAN_APPROVAL] Creating assistant message for plan: session=${currentSession.id}`)
+                    const newMessage: Message = {
+                      id: assistantMessageId,
+                      role: 'assistant',
+                      content: '',
+                      tokens_used: 0,
+                      created_at: new Date().toISOString(),
+                      metadata: {
+                        agent_name: 'planner'
+                      },
+                      response_type: 'plan_proposal',
+                      plan: planData
+                    }
+                    return {
+                      messages: [...state.messages, newMessage]
+                    }
+                  }
+
+                  // Update existing message with plan data
+                  console.log(`[HITL] [PLAN_APPROVAL] Updating message ${assistantMessageId} with plan data:`, {
+                    response_type: 'plan_proposal',
+                    plan: planData,
+                    planStepsCount: planData?.plan?.length || 0
+                  })
+
+                  return {
+                    messages: state.messages.map((msg: Message) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            response_type: 'plan_proposal',
+                            plan: planData
+                          }
+                        : msg
+                    ),
+                  }
+                })
+
+              } else if (interruptValue && interruptValue.type === 'tool_approval') {
                 const tools = interruptValue.tools || []
-                
+
                 // Generate unique interrupt ID from tools to prevent duplicate processing
                 const interruptId = JSON.stringify(tools.map((t: any) => t.tool_call_id || t.id).sort())
-                
+
                 // Deduplicate - prevent processing same interrupt twice
                 if (processedInterruptsRef.current.has(interruptId)) {
                   console.log(`[HITL] [INTERRUPT] Ignoring duplicate interrupt: interruptId=${interruptId} session=${currentSession.id}`)
                   return
                 }
                 processedInterruptsRef.current.add(interruptId)
-                
+
                 console.log(`[HITL] [INTERRUPT] Received interrupt with ${tools.length} tools requiring approval:`, tools.map((t: any) => ({ tool: t.tool, tool_call_id: t.tool_call_id })))
                 
                 // Mark message as ready to show tool calls (even though stream isn't complete)
@@ -853,14 +924,22 @@ export default function ChatPage() {
             setWaitingForResponse(false)
             setWaitingMessageId(null)
           },
-          async () => {
-            // Stream complete - no reload needed!
-            // All data (content, tool_calls, agent_name, metadata) comes from the stream
-            // Status messages are ephemeral and already updated in real-time
-            // The assistant message is already complete with all metadata from update events
+          () => {
+            // Stream complete
+            const duration = Date.now() - streamStartTime
+            console.log(`[FRONTEND] [STREAM_COMPLETE] Stream finished session=${currentSession.id} duration=${duration}ms event_counts=${JSON.stringify(eventTypeCounts)}`)
+
+            // If a plan was executing, reload messages to get the execution results
+            // Plan execution saves results to DB but doesn't stream them as tokens
+            if (executingPlanMessageId) {
+              console.log(`[FRONTEND] [PLAN_EXEC_COMPLETE] Plan execution completed, reloading messages session=${currentSession.id}`)
+              loadMessages(currentSession.id)
+            }
+
             setSending(false)
             setWaitingForResponse(false)
             setWaitingMessageId(null)
+            setExecutingPlanMessageId(null)
           }
         )
 
@@ -1170,17 +1249,37 @@ export default function ChatPage() {
               set((state: { messages: Message[] }) => {
                 const currentMessage = state.messages.find((msg: Message) => msg.id === executionMessageId)
                 if (!currentMessage) return state
-                
+
+                // Handle plan progress updates
+                let updatedPlan = currentMessage.plan
+                if (updateData.plan_index !== undefined && currentMessage.plan) {
+                  updatedPlan = {
+                    ...currentMessage.plan,
+                    plan_index: updateData.plan_index,
+                  }
+                }
+
                 const updatedMetadata = {
                   ...currentMessage.metadata,
                   ...(updateData.agent_name && { agent_name: updateData.agent_name }),
                   ...(updateData.tool_calls && { tool_calls: updateData.tool_calls }),
                 }
-                
+
+                // Add status message for plan progress
+                let updatedStatus = currentMessage.status
+                if (updateData.plan_index !== undefined && updateData.plan_total !== undefined) {
+                  updatedStatus = `Executing plan step ${updateData.plan_index + 1} of ${updateData.plan_total}...`
+                }
+
                 return {
                   messages: state.messages.map((msg: Message) =>
                     msg.id === executionMessageId
-                      ? { ...msg, metadata: updatedMetadata }
+                      ? {
+                          ...msg,
+                          metadata: updatedMetadata,
+                          ...(updatedPlan && { plan: updatedPlan }),
+                          ...(updatedStatus && { status: updatedStatus }),
+                        }
                       : msg
                   ),
                 }
@@ -1271,6 +1370,14 @@ export default function ChatPage() {
     loadMessages,
   })
 
+  const { handleApprovePlan, handleRejectPlan, approvingPlans } = usePlanApproval({
+    currentSession,
+    updateMessages: (updater) => {
+      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
+    },
+    setExecutingPlanMessageId,
+  })
+
   // ============================================================================
   // RENDER
   // ============================================================================
@@ -1333,7 +1440,9 @@ export default function ChatPage() {
               onModelChange={handleModelChange}
               onOpenStats={handleOpenStats}
               onDeleteChat={handleDeleteCurrentChat}
+              onDeleteAllChats={handleDeleteAllSessions}
               hasCurrentSession={!!currentSession}
+              sessionCount={sessions.length}
               messages={messages}
             />
 
@@ -1381,8 +1490,8 @@ export default function ChatPage() {
                   }}
                   approvingToolCalls={approvingToolCalls}
                   currentSession={currentSession}
-                  onPlanApproval={handlePlanApproval}
-                  onPlanRejection={handlePlanRejection}
+                  onPlanApproval={handleApprovePlan}
+                  onPlanRejection={handleRejectPlan}
                   executingPlanMessageId={executingPlanMessageId}
                   userEmail={user?.email}
                 />

@@ -173,18 +173,62 @@ def chat_messages(request, session_id):
     
     if request.method == 'GET':
         # Get messages in session
-        messages = get_messages(session_id)
-        messages_data = [
-            {
-                'id': msg.id,
-                'role': msg.role,
-                'content': msg.content,
-                'tokens_used': msg.tokens_used,
-                'created_at': msg.created_at.isoformat(),
-                'metadata': msg.metadata or {},
-            }
-            for msg in messages
-        ]
+        # Try to get from active workflow buffer first (optimization for active sessions)
+        messages_data = []
+        
+        try:
+            from asgiref.sync import async_to_sync
+            from app.agents.temporal.workflow_manager import get_workflow_messages
+            
+            # Try to get messages from workflow buffer
+            workflow_messages = async_to_sync(get_workflow_messages)(user.id, session_id)
+            
+            if workflow_messages:
+                # Convert workflow message dicts to API format
+                messages_data = [
+                    {
+                        'id': None,  # Messages in buffer don't have DB IDs yet
+                        'role': msg.get('role', 'assistant'),
+                        'content': msg.get('content', ''),
+                        'tokens_used': msg.get('tokens_used', 0),
+                        'created_at': None,  # Timestamp is in msg.get('timestamp')
+                        'metadata': msg.get('metadata', {}),
+                        'buffered': True,  # Indicates message is in workflow buffer
+                    }
+                    for msg in workflow_messages
+                ]
+                logger.debug(f"Retrieved {len(messages_data)} messages from workflow buffer for session {session_id}")
+            else:
+                # Fallback to database
+                messages = get_messages(session_id)
+                messages_data = [
+                    {
+                        'id': msg.id,
+                        'role': msg.role,
+                        'content': msg.content,
+                        'tokens_used': msg.tokens_used,
+                        'created_at': msg.created_at.isoformat(),
+                        'metadata': msg.metadata or {},
+                    }
+                    for msg in messages
+                ]
+                logger.debug(f"Retrieved {len(messages_data)} messages from database for session {session_id}")
+        except Exception as e:
+            # Fallback to database on any error
+            logger.warning(f"Failed to get messages from workflow buffer, falling back to database: {e}")
+            messages = get_messages(session_id)
+            messages_data = [
+                {
+                    'id': msg.id,
+                    'role': msg.role,
+                    'content': msg.content,
+                    'tokens_used': msg.tokens_used,
+                    'created_at': msg.created_at.isoformat(),
+                    'metadata': msg.metadata or {},
+                }
+                for msg in messages
+            ]
+        
         return JsonResponse({'messages': messages_data})
     
     elif request.method == 'POST':

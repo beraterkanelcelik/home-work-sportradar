@@ -101,6 +101,17 @@ export default function MessageItem({
   const hasRawToolOutputs = message.raw_tool_outputs && message.raw_tool_outputs.length > 0
   const isStatusMessage = message.role === 'system' && message.metadata?.status_type === 'task_status'
 
+  // Debug logging for plan proposals
+  if (message.response_type === 'plan_proposal') {
+    console.log(`[MESSAGE_ITEM] [PLAN] Rendering plan proposal for message ${message.id}:`, {
+      has_plan: !!message.plan,
+      plan_steps_count: message.plan?.plan?.length || 0,
+      response_type: message.response_type,
+      is_executing: isExecutingPlan,
+      isPlanProposal
+    })
+  }
+
   // Render status messages as system messages with animation (like Cursor chat)
   if (isStatusMessage) {
     const isCompleted = message.metadata?.is_completed === true

@@ -17,6 +17,9 @@ def increment_user_token_usage(user_id: int, tokens: int) -> None:
     This value is cumulative and never decreases, ensuring accurate all-time token tracking
     even when individual chats or sessions are deleted.
     
+    Uses F() expressions for atomic updates to avoid race conditions and reduce lock contention.
+    This optimization reduces database round trips and improves concurrency.
+    
     Should be called whenever tokens are used:
     - LLM calls (chat completions)
     - Embedding model calls
@@ -32,12 +35,16 @@ def increment_user_token_usage(user_id: int, tokens: int) -> None:
         return
     
     try:
-        user = User.objects.get(id=user_id)
-        user.token_usage_count += tokens
-        user.save(update_fields=['token_usage_count'])
-        logger.debug(f"Incremented token usage for user {user_id}: +{tokens} tokens (total: {user.token_usage_count})")
-    except User.DoesNotExist:
-        logger.warning(f"User {user_id} not found when trying to increment token usage")
+        # Use F() expression for atomic update - reduces lock contention and database round trips
+        # This is more efficient than get() + save() as it's a single UPDATE query
+        from django.db.models import F
+        updated = User.objects.filter(id=user_id).update(
+            token_usage_count=F('token_usage_count') + tokens
+        )
+        if updated > 0:
+            logger.debug(f"Incremented token usage for user {user_id}: +{tokens} tokens (atomic update)")
+        else:
+            logger.warning(f"User {user_id} not found when trying to increment token usage")
     except Exception as e:
         logger.error(f"Error incrementing token usage for user {user_id}: {e}", exc_info=True)
 
@@ -45,6 +52,8 @@ def increment_user_token_usage(user_id: int, tokens: int) -> None:
 async def increment_user_token_usage_async(user_id: int, tokens: int) -> None:
     """
     Increment token usage for a user (async version for use in async contexts).
+    
+    Uses F() expressions for atomic updates, reducing lock contention and database round trips.
     
     Args:
         user_id: User ID
@@ -54,16 +63,16 @@ async def increment_user_token_usage_async(user_id: int, tokens: int) -> None:
         return
     
     try:
-        # Wrap Django ORM calls with sync_to_async
-        user = await sync_to_async(
-            lambda: User.objects.get(id=user_id)
+        # Use F() expression for atomic update - more efficient than get() + save()
+        from django.db.models import F
+        updated = await sync_to_async(
+            lambda: User.objects.filter(id=user_id).update(
+                token_usage_count=F('token_usage_count') + tokens
+            )
         )()
-        user.token_usage_count += tokens
-        await sync_to_async(
-            lambda: user.save(update_fields=['token_usage_count'])
-        )()
-        logger.debug(f"Incremented token usage for user {user_id}: +{tokens} tokens (total: {user.token_usage_count})")
-    except User.DoesNotExist:
-        logger.warning(f"User {user_id} not found when trying to increment token usage")
+        if updated > 0:
+            logger.debug(f"Incremented token usage for user {user_id}: +{tokens} tokens (atomic update)")
+        else:
+            logger.warning(f"User {user_id} not found when trying to increment token usage")
     except Exception as e:
         logger.error(f"Error incrementing token usage for user {user_id}: {e}", exc_info=True)

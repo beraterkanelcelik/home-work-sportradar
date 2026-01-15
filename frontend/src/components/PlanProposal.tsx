@@ -3,8 +3,9 @@ import { Button } from '@/components/ui/button'
 
 export interface PlanStep {
   action: string
-  tool: string
-  props: Record<string, any>
+  tool?: string  // For "tool" actions
+  answer?: string  // For "answer" actions
+  props?: Record<string, any>  // Optional - only present for "tool" actions with arguments
   agent: string
   query: string
 }
@@ -24,12 +25,28 @@ interface PlanProposalProps {
 }
 
 export default function PlanProposal({ plan, onApprove, onReject, isExecuting = false }: PlanProposalProps) {
+  // Debug logging
+  console.log('[PLAN_PROPOSAL] Rendering with plan:', {
+    type: plan.type,
+    steps_count: plan.plan?.length || 0,
+    plan_total: plan.plan_total,
+    isExecuting
+  })
+
   const formatAgentName = (agent: string): string => {
     return agent.charAt(0).toUpperCase() + agent.slice(1)
   }
 
-  const formatToolName = (tool: string): string => {
+  const formatToolName = (tool: string | undefined): string => {
+    if (!tool) return 'Direct Answer'
     return tool.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
+  }
+
+  const getStepLabel = (step: PlanStep): string => {
+    if (step.action === 'answer') {
+      return step.answer || 'Provide Answer'
+    }
+    return formatToolName(step.tool)
   }
 
   return (
@@ -81,7 +98,7 @@ export default function PlanProposal({ plan, onApprove, onReject, isExecuting = 
               <div className="flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-foreground">
-                    {formatToolName(step.tool)}
+                    {getStepLabel(step)}
                   </span>
                   <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">
                     {formatAgentName(step.agent)}
@@ -93,7 +110,7 @@ export default function PlanProposal({ plan, onApprove, onReject, isExecuting = 
               </div>
             </div>
 
-            {Object.keys(step.props).length > 0 && (
+            {step.props && Object.keys(step.props).length > 0 && (
               <div className="ml-8 space-y-1">
                 <div className="text-xs font-semibold text-muted-foreground">Arguments:</div>
                 <div className="text-xs font-mono bg-muted/50 p-2 rounded border">
