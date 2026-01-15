@@ -79,11 +79,13 @@ def _register_agents():
         from app.agents.agents.greeter import GreeterAgent
         from app.agents.agents.search import SearchAgent
         from app.agents.agents.supervisor import SupervisorAgent
-        
+        from app.agents.agents.planner import PlannerAgent
+
         AgentFactory.register("greeter", GreeterAgent)
         AgentFactory.register("search", SearchAgent)
         AgentFactory.register("supervisor", SupervisorAgent)
-        
+        AgentFactory.register("planner", PlannerAgent)
+
         logger.info("Agent factory: Registered agents")
     except Exception as e:
         logger.warning(f"Failed to register some agents: {e}")

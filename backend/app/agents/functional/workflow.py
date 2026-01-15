@@ -245,6 +245,88 @@ def is_auto_executable(tool_name: str, agent_name: str) -> bool:
     return False
 
 
+def _should_generate_plan(query: str, agent_name: str) -> bool:
+    """
+    Determine if planning is needed using heuristics.
+
+    This is a fast heuristic check to avoid calling the planning agent
+    for simple queries.
+
+    Args:
+        query: User query text
+        agent_name: Routed agent name
+
+    Returns:
+        True if planning should be attempted, False otherwise
+    """
+    # Simple heuristics to detect multi-step queries
+    multi_step_keywords = [
+        "then", "after that", "first", "next", "finally",
+        "multiple", "several", "both", "all of the following",
+        "step by step", "and then"
+    ]
+
+    query_lower = query.lower()
+
+    # Check for multi-step indicators
+    has_multi_step = any(kw in query_lower for kw in multi_step_keywords)
+
+    # Check for multiple sentences (rough proxy for complexity)
+    sentence_count = query.count('.') + query.count('!') + query.count('?')
+    is_complex = sentence_count > 1 or len(query.split()) > 30
+
+    # Skip planning for very simple queries
+    if len(query.split()) < 10 and not has_multi_step:
+        return False
+
+    # Attempt planning for multi-step or complex queries
+    return has_multi_step or is_complex
+
+
+def request_plan_approval(plan: Dict[str, Any], session_id: int) -> Dict[str, Any]:
+    """
+    Request approval for execution plan using LangGraph interrupt pattern.
+
+    Similar to request_tool_approvals(), but for plan proposals.
+    Uses LangGraph's native interrupt() to pause execution until
+    the user approves or rejects the plan.
+
+    Args:
+        plan: Plan dictionary with plan steps
+        session_id: Chat session ID for logging and context
+
+    Returns:
+        Approval decision from resume:
+        {
+            "approved": bool,
+            "reason": str (optional)
+        }
+    """
+    plan_steps = plan.get('plan', [])
+    logger.info(f"[PLAN_HITL] [INTERRUPT] Requesting approval for {len(plan_steps)} step plan: session={session_id}")
+
+    # Log plan steps for debugging
+    for idx, step in enumerate(plan_steps):
+        action = step.get('action', 'unknown')
+        tool = step.get('tool', step.get('answer', 'N/A'))
+        logger.debug(f"[PLAN_HITL] Step {idx + 1}: {action} - {tool}")
+
+    # Call interrupt() - this pauses execution and waits for resume
+    # The interrupt payload will be surfaced via __interrupt__ in stream
+    # When resumed with Command(resume=...), interrupt() returns the resume payload
+    decision = interrupt({
+        "type": "plan_approval",
+        "session_id": session_id,
+        "plan": plan,
+    })
+
+    # decision is whatever UI returns on resume
+    # Expected shape: {"approved": bool, "reason": str}
+    approved = decision.get('approved', False) if decision else False
+    logger.info(f"[PLAN_HITL] [RESUME] Plan approval decision: approved={approved} session={session_id}")
+    return decision or {"approved": False}
+
+
 @entrypoint(checkpointer=get_sync_checkpointer())
 def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentResponse:
     """
@@ -430,7 +512,84 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                         clarification=routing.query,
                         agent_name="supervisor"
                     )
-                
+
+                # NEW: Check if planning is needed (only on initial run, not on resume)
+                if not isinstance(request, Command) and _should_generate_plan(query, routing.agent):
+                    logger.info(f"[PLANNING] Heuristics suggest planning needed for query")
+
+                    # Import and invoke planning task
+                    from app.agents.functional.tasks.planner import analyze_and_plan
+
+                    plan_analysis = analyze_and_plan(
+                        messages=messages,
+                        user_id=current_user_id,
+                        config=checkpoint_config
+                    ).result()
+
+                    # Check if plan was generated
+                    if plan_analysis.get("requires_plan") and plan_analysis.get("plan"):
+                        plan_steps = plan_analysis["plan"]
+                        logger.info(f"[PLANNING] Generated plan with {len(plan_steps)} steps")
+
+                        # Create plan proposal data
+                        plan_data = {
+                            "type": "plan_proposal",
+                            "plan": plan_steps,
+                            "plan_index": 0,
+                            "plan_total": len(plan_steps),
+                        }
+
+                        # Save plan proposal message BEFORE interrupt
+                        if current_session_id:
+                            from app.agents.functional.tasks import save_message_task
+                            save_message_task(
+                                response=AgentResponse(
+                                    type="plan_proposal",
+                                    plan=plan_data,
+                                    agent_name="planner",
+                                    reply=plan_analysis.get("reasoning", "I've created a plan for this task.")
+                                ),
+                                session_id=current_session_id,
+                                user_id=current_user_id,
+                                tool_calls=[],
+                                run_id=current_run_id,
+                                parent_message_id=current_parent_message_id
+                            ).result()
+                            logger.info(f"[PLANNING] Saved plan proposal message to database")
+
+                        # Request plan approval via interrupt()
+                        approval = request_plan_approval(plan_data, current_session_id or 0)
+
+                        if not approval.get("approved"):
+                            # Plan rejected
+                            logger.info(f"[PLANNING] Plan rejected by user")
+                            return AgentResponse(
+                                type="answer",
+                                reply="Plan rejected. Please provide a new query or clarify your request.",
+                                agent_name="planner"
+                            )
+
+                        # Plan approved - execute it
+                        logger.info(f"[PLANNING] Plan approved, executing {len(plan_steps)} steps")
+                        return _execute_plan_workflow(
+                            AgentRequest(
+                                query=query,
+                                session_id=current_session_id,
+                                user_id=current_user_id,
+                                plan_steps=plan_steps,
+                                flow="plan",
+                                trace_id=trace_id_for_langfuse,
+                                run_id=current_run_id,
+                                parent_message_id=current_parent_message_id
+                            ),
+                            checkpoint_config,
+                            checkpointer,
+                            thread_id
+                        )
+                    else:
+                        logger.info(f"[PLANNING] No plan needed: {plan_analysis.get('reasoning', 'Unknown reason')}")
+                        # Continue with normal agent execution below
+
                 # Normal flow: invoke agent
                 # When resuming from interrupt, LangGraph will restore checkpointed state
                 # and interrupt() will return the resume payload (approval decisions)
@@ -1025,6 +1184,50 @@ def partition_tools(
     }
 
 
+def _update_plan_progress(session_id: int, current_step: int, total_steps: int):
+    """
+    Update plan execution progress in database.
+
+    Finds the latest plan proposal message and updates its plan_index
+    to reflect current execution progress.
+
+    Args:
+        session_id: Chat session ID
+        current_step: Current step index (0-based)
+        total_steps: Total number of steps in plan
+    """
+    try:
+        from django.db.models import Q
+        from asgiref.sync import sync_to_async
+
+        # Use Django ORM to find and update message
+        # This is a sync operation, so we use it directly (called from sync context)
+        try:
+            from app.db.models.message import Message
+
+            # Find latest plan proposal message
+            latest_plan_msg = Message.objects.filter(
+                session_id=session_id,
+                role="assistant",
+                metadata__response_type="plan_proposal"
+            ).order_by('-created_at').first()
+
+            if latest_plan_msg and latest_plan_msg.metadata:
+                if 'plan' not in latest_plan_msg.metadata:
+                    return
+
+                # Update plan_index
+                latest_plan_msg.metadata['plan']['plan_index'] = current_step
+                latest_plan_msg.save(update_fields=['metadata'])
+
+                logger.debug(f"[PLAN_PROGRESS] Updated plan progress: {current_step + 1}/{total_steps} session={session_id}")
+        except ImportError:
+            # Message model not available (testing environment)
+            logger.debug(f"[PLAN_PROGRESS] Message model not available, skipping progress update")
+    except Exception as e:
+        logger.warning(f"[PLAN_PROGRESS] Failed to update plan progress: {e}")
+
+
 def _execute_plan_workflow(
     request: AgentRequest,
     checkpoint_config: Dict[str, Any],
@@ -1080,76 +1283,107 @@ def _execute_plan_workflow(
         
         results: List[str] = []
         raw_tool_outputs: List[Dict[str, Any]] = []
-        
+        failed_step_index = None  # Track if execution stopped due to failure
+
         # Process each plan step
-        for step in request.plan_steps or []:
+        for step_index, step in enumerate(request.plan_steps or []):
             action = step.get("action")
-            
+
+            # Update plan progress in database
+            if request.session_id:
+                _update_plan_progress(request.session_id, step_index, len(request.plan_steps))
+
+            logger.info(f"[PLAN_EXEC] Step {step_index + 1}/{len(request.plan_steps)}: action={action}")
+
             if action == "answer":
                 answer = step.get("answer", "")
                 if answer:
                     results.append(answer)
                 continue
-            
+
             if action == "tool":
                 tool_name = step.get("tool")
                 tool_args = step.get("props", {})
                 agent_name = step.get("agent", "greeter")
                 step_query = step.get("query", request.query)
-                
-                # Execute tool
-                tool_calls = [{"name": tool_name, "args": tool_args}]
-                tool_results = execute_tools(
-                    tool_calls=tool_calls,
-                    user_id=request.user_id,
-                    agent_name=agent_name,
-                    config=checkpoint_config
-                ).result()
-                
-                if tool_results:
-                    tool_result = tool_results[0]
-                    
-                    # Import truncate function
-                    from app.agents.functional.tasks import truncate_tool_output
-                    
-                    # Store raw output (truncate large outputs)
-                    raw_tool_outputs.append({
-                        "tool": tool_result.tool,
-                        "args": tool_result.args,
-                        "output": truncate_tool_output(tool_result.output),
-                    })
-                    
-                    # Add tool result as ToolMessage
-                    # Generate proper tool_call_id (consistent with main workflow UUID-based approach)
-                    import uuid
-                    tool_call_id = tool_result.tool_call_id
-                    if not tool_call_id:
-                        # Generate UUID-based ID (consistent with main workflow pattern)
-                        tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
-                    
-                    tool_msg = ToolMessage(
-                        content=str(tool_result.output) if tool_result.output else tool_result.error,
-                        tool_call_id=tool_call_id,
-                        name=tool_result.tool
-                    )
-                    messages = messages + [tool_msg]
-                    
-                    # Post-process with agent
-                    if tool_result.output is not None or tool_result.error:
-                        agent_response = refine_with_tool_results(
-                            agent_name=agent_name,
-                            messages=messages,
-                            tool_results=tool_results,
-                            user_id=request.user_id,
-                            model_name=None,
-                            config=checkpoint_config
-                        ).result()
-                        
-                        if agent_response.reply:
-                            results.append(agent_response.reply)
-        
+
+                try:
+                    # Execute tool
+                    logger.info(f"[PLAN_EXEC] Executing tool: {tool_name} with agent {agent_name}")
+                    tool_calls = [{"name": tool_name, "args": tool_args}]
+                    tool_results = execute_tools(
+                        tool_calls=tool_calls,
+                        user_id=request.user_id,
+                        agent_name=agent_name,
+                        config=checkpoint_config
+                    ).result()
+
+                    if tool_results:
+                        tool_result = tool_results[0]
+
+                        # Check for errors - STOP ON FIRST FAILURE
+                        if tool_result.error:
+                            logger.error(f"[PLAN_EXEC] Tool failed at step {step_index + 1}: {tool_result.error}")
+                            failed_step_index = step_index
+                            results.append(f"❌ Step {step_index + 1} failed: {tool_result.error}")
+                            break  # STOP execution immediately
+
+                        # Import truncate function
+                        from app.agents.functional.tasks import truncate_tool_output
+
+                        # Store successful raw output (truncate large outputs)
+                        raw_tool_outputs.append({
+                            "step": step_index + 1,
+                            "tool": tool_result.tool,
+                            "args": tool_result.args,
+                            "output": truncate_tool_output(tool_result.output),
+                        })
+
+                        # Add tool result as ToolMessage
+                        # Generate proper tool_call_id (consistent with main workflow UUID-based approach)
+                        import uuid
+                        tool_call_id = tool_result.tool_call_id
+                        if not tool_call_id:
+                            # Generate UUID-based ID (consistent with main workflow pattern)
+                            tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
+
+                        tool_msg = ToolMessage(
+                            content=str(tool_result.output) if tool_result.output else tool_result.error,
+                            tool_call_id=tool_call_id,
+                            name=tool_result.tool
+                        )
+                        messages = messages + [tool_msg]
+
+                        # Post-process with agent
+                        if tool_result.output is not None:
+                            logger.info(f"[PLAN_EXEC] Refining results with agent {agent_name}")
+                            agent_response = refine_with_tool_results(
+                                agent_name=agent_name,
+                                messages=messages,
+                                tool_results=tool_results,
+                                user_id=request.user_id,
+                                model_name=None,
+                                config=checkpoint_config
+                            ).result()
+
+                            if agent_response.reply:
+                                results.append(agent_response.reply)
+                                logger.info(f"[PLAN_EXEC] Step {step_index + 1} completed successfully")
+
+                except Exception as e:
+                    # Exception during tool execution - STOP ON FAILURE
+                    logger.error(f"[PLAN_EXEC] Exception at step {step_index + 1}: {e}", exc_info=True)
+                    failed_step_index = step_index
+                    results.append(f"❌ Step {step_index + 1} failed: {str(e)}")
+                    break  # STOP execution immediately
+
         # Combine results
         final_text = "\n".join(results) if results else ""
+
+        # Add failure notice if execution stopped early
+        if failed_step_index is not None:
+            final_text += f"\n\n⚠️ Plan execution stopped at step {failed_step_index + 1} due to failure."
+            logger.warning(f"[PLAN_EXEC] Plan execution stopped at step {failed_step_index + 1}/{len(request.plan_steps)}")
         
         # Save message if session_id provided
         if request.session_id and final_text:
@@ -1252,6 +1486,10 @@ async def ai_agent_workflow_events(request: Union[AgentRequest, Command], sessio
         "load_messages_task": "Loading conversation history...",
         "check_summarization_needed_task": "Checking if summarization needed...",
         "save_message_task": "Saving message...",
+        # Planning-related tasks
+        "analyze_and_plan": "Analyzing task and generating plan...",
+        "_execute_plan_workflow": "Executing plan...",
+        "_update_plan_progress": "Updating plan progress...",
         # Backward compatibility aliases (fallback)
         "supervisor_task": "Routing to agent...",
         "generic_agent_task": "Processing with agent...",

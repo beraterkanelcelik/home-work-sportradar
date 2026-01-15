@@ -10,6 +10,7 @@ from app.agents.functional.tasks.common import (
     check_summarization_needed_task,
     truncate_tool_output,
 )
+from app.agents.functional.tasks.planner import analyze_and_plan
 
 __all__ = [
     "route_to_agent",
@@ -20,4 +21,5 @@ __all__ = [
     "save_message_task",
     "check_summarization_needed_task",
     "truncate_tool_output",
+    "analyze_and_plan",
 ]

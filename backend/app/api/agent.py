@@ -764,3 +764,125 @@ async def approve_tool(request):
     except Exception as e:
         logger.error(f"Unexpected error in approve_tool endpoint: {e}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+async def approve_plan(request):
+    """
+    Resume interrupted workflow with plan approval decision (LangGraph native interrupt pattern).
+
+    Request body:
+    {
+        "chat_session_id": int,
+        "resume": {
+            "approved": bool,
+            "reason": str (optional)
+        }
+    }
+
+    Returns:
+    {
+        "success": bool,
+        "status": str,
+        "error": str (if failed)
+    }
+    """
+    user = await get_current_user_async(request)
+    if not user:
+        logger.warning("Unauthenticated request to approve_plan endpoint")
+        return JsonResponse(
+            {'error': 'Authentication required'},
+            status=401
+        )
+
+    try:
+        data = json.loads(request.body)
+        chat_session_id = data.get('chat_session_id')
+        resume = data.get('resume')
+
+        if not chat_session_id:
+            logger.warning(f"Missing chat_session_id in approve_plan request from user {user.id}")
+            return JsonResponse(
+                {'error': 'chat_session_id is required'},
+                status=400
+            )
+
+        if not resume:
+            logger.warning(f"Missing resume in approve_plan request from user {user.id}")
+            return JsonResponse(
+                {'error': 'resume is required'},
+                status=400
+            )
+
+        # Validate session ownership
+        from app.services.chat_service import get_session
+        from asgiref.sync import sync_to_async
+
+        session = await sync_to_async(get_session)(user.id, chat_session_id)
+        if not session:
+            logger.warning(f"[PLAN_HITL] [SECURITY] Session ownership validation failed: user={user.id} session={chat_session_id}")
+            return JsonResponse({
+                'error': 'Chat session not found or access denied'
+            }, status=404)
+
+        approved = resume.get('approved', False)
+        reason = resume.get('reason', '')
+
+        logger.info(f"[PLAN_HITL] [RESUME] Plan approval request: user={user.id} session={chat_session_id} approved={approved}")
+
+        # Send resume signal to Temporal workflow
+        try:
+            from app.core.temporal import get_temporal_client
+            from app.agents.temporal.workflow_manager import get_workflow_id
+
+            client = await get_temporal_client()
+            workflow_id = get_workflow_id(user.id, chat_session_id)
+            workflow_handle = client.get_workflow_handle(workflow_id)
+
+            # Verify workflow exists and is running
+            try:
+                description = await workflow_handle.describe()
+                if description.status.name != "RUNNING":
+                    logger.warning(f"[PLAN_HITL] [RESUME] Workflow {workflow_id} is not running (status: {description.status.name})")
+                    return JsonResponse({
+                        'success': False,
+                        'error': 'Workflow is not running. Please send a new message first.'
+                    }, status=400)
+            except Exception as e:
+                logger.error(f"[PLAN_HITL] [RESUME] Workflow {workflow_id} not found: {e}")
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Workflow not found. Please send a new message first.'
+                }, status=404)
+
+            # Send resume signal with plan approval decision
+            await workflow_handle.signal(
+                "resume",
+                args=(resume,)
+            )
+            logger.info(f"[PLAN_HITL] [RESUME] Sent plan approval signal to workflow: session={chat_session_id} approved={approved}")
+
+        except Exception as e:
+            logger.error(f"[PLAN_HITL] [RESUME] Failed to send resume signal to workflow: error={e} session={chat_session_id}", exc_info=True)
+            return JsonResponse({
+                'success': False,
+                'error': f'Failed to send resume signal: {str(e)}'
+            }, status=500)
+
+        # Return immediately - workflow will process asynchronously
+        logger.info(f"[PLAN_HITL] [RESUME] Plan approval signal sent successfully: session={chat_session_id}")
+        return JsonResponse({
+            'success': True,
+            'status': 'approved' if approved else 'rejected',
+            'message': f"Plan {'approved' if approved else 'rejected'}. Workflow will {'continue processing' if approved else 'stop'}.",
+            'session_id': chat_session_id,
+            'messages_endpoint': f"/api/chats/{chat_session_id}/messages/"
+        })
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in approve_plan request: {e}")
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error in approve_plan endpoint: {e}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
