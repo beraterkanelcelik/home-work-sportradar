@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { getErrorMessage } from '@/lib/utils'
 
+
 interface UserProfile {
   id: number
   email: string
@@ -35,6 +36,14 @@ interface TokenStats {
   account_created: string
 }
 
+interface ApiKeyStatus {
+  openai_api_key: { is_set: boolean; source: string }
+  langfuse_public_key: { is_set: boolean; source: string }
+  langfuse_secret_key: { is_set: boolean; source: string }
+  langfuse_keys_complete: boolean
+}
+
+
 export default function ProfilePage() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [stats, setStats] = useState<TokenStats | null>(null)
@@ -44,16 +53,27 @@ export default function ProfilePage() {
   const [lastName, setLastName] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // API key form
+  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus | null>(null)
+  const [openaiKey, setOpenaiKey] = useState('')
+  const [langfusePublicKey, setLangfusePublicKey] = useState('')
+  const [langfuseSecretKey, setLangfuseSecretKey] = useState('')
+  const [savingKeys, setSavingKeys] = useState(false)
+  const [clearingKeys, setClearingKeys] = useState(false)
+
   // Password change form
   const [oldPassword, setOldPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [changingPassword, setChangingPassword] = useState(false)
 
+
   useEffect(() => {
     loadProfile()
     loadStats()
+    loadApiKeyStatus()
   }, [])
+
 
   const loadProfile = async () => {
     try {
@@ -76,6 +96,57 @@ export default function ProfilePage() {
       toast.error(getErrorMessage(error, 'Failed to load stats'))
     }
   }
+
+  const loadApiKeyStatus = async () => {
+    try {
+      const response = await userAPI.getApiKeysStatus()
+      setApiKeyStatus(response.data)
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to load API key status'))
+    }
+  }
+
+  const handleSaveApiKeys = async () => {
+    if ((langfusePublicKey && !langfuseSecretKey) || (!langfusePublicKey && langfuseSecretKey)) {
+      toast.error('Both Langfuse keys must be provided together')
+      return
+    }
+
+    setSavingKeys(true)
+    try {
+      const response = await userAPI.updateApiKeys({
+        openai_api_key: openaiKey || '',
+        langfuse_public_key: langfusePublicKey || '',
+        langfuse_secret_key: langfuseSecretKey || '',
+      })
+      setApiKeyStatus(response.data.status)
+      setOpenaiKey('')
+      setLangfusePublicKey('')
+      setLangfuseSecretKey('')
+      toast.success('API keys saved')
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to update API keys'))
+    } finally {
+      setSavingKeys(false)
+    }
+  }
+
+  const handleClearApiKeys = async () => {
+    setClearingKeys(true)
+    try {
+      const response = await userAPI.clearApiKeys()
+      setApiKeyStatus(response.data.status)
+      setOpenaiKey('')
+      setLangfusePublicKey('')
+      setLangfuseSecretKey('')
+      toast.success('API keys cleared')
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, 'Failed to clear API keys'))
+    } finally {
+      setClearingKeys(false)
+    }
+  }
+
 
   const handleSaveProfile = async () => {
     setSaving(true)
@@ -250,6 +321,78 @@ export default function ProfilePage() {
         )}
       </div>
 
+      {/* API Keys Section */}
+      <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-lg sm:text-xl font-semibold">API Keys</h2>
+            <p className="text-sm text-muted-foreground">Add your own keys for OpenAI or Langfuse. Stored encrypted.</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleClearApiKeys} disabled={clearingKeys} className="rounded-lg">
+              {clearingKeys ? 'Clearing...' : 'Clear Keys'}
+            </Button>
+            <Button onClick={handleSaveApiKeys} disabled={savingKeys} className="rounded-lg">
+              {savingKeys ? 'Saving...' : 'Save Keys'}
+            </Button>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium">OpenAI API Key</label>
+              <span className="text-xs text-muted-foreground flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${apiKeyStatus?.openai_api_key?.is_set ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+                {apiKeyStatus?.openai_api_key?.is_set ? 'Custom key set' : 'Not set'}
+              </span>
+            </div>
+              <input
+                type="password"
+                value={openaiKey}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setOpenaiKey(e.target.value)}
+                placeholder="sk-..."
+                autoComplete="off"
+                className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
+              />
+          </div>
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium">Langfuse Public Key</label>
+              <span className="text-xs text-muted-foreground flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${apiKeyStatus?.langfuse_public_key?.is_set ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+                {apiKeyStatus?.langfuse_public_key?.is_set ? 'Custom key set' : 'Not set'}
+              </span>
+            </div>
+              <input
+                type="password"
+                value={langfusePublicKey}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLangfusePublicKey(e.target.value)}
+                placeholder="pk-..."
+                autoComplete="off"
+                className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
+              />
+          </div>
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium">Langfuse Secret Key</label>
+              <span className="text-xs text-muted-foreground flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${apiKeyStatus?.langfuse_secret_key?.is_set ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+                {apiKeyStatus?.langfuse_secret_key?.is_set ? 'Custom key set' : 'Not set'}
+              </span>
+            </div>
+              <input
+                type="password"
+                value={langfuseSecretKey}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setLangfuseSecretKey(e.target.value)}
+                placeholder="sk-..."
+                autoComplete="off"
+                className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
+              />
+            <p className="text-xs text-muted-foreground mt-1">Provide both Langfuse keys together.</p>
+          </div>
+        </div>
+      </div>
+
       {/* Change Password Section */}
       <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
         <h2 className="text-lg sm:text-xl font-semibold mb-4">Change Password</h2>
@@ -289,6 +432,7 @@ export default function ProfilePage() {
           </Button>
         </div>
       </div>
+
     </div>
   )
 }

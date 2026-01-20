@@ -44,7 +44,8 @@ Tracing: **Langfuse**
 ### Run
 ```bash
 cp .env.example .env
-# set OPENAI_API_KEY in .env
+# add your OpenAI key in Profile
+
 
 docker-compose up -d
 docker-compose exec backend python manage.py migrate
@@ -63,7 +64,6 @@ docker-compose exec backend python manage.py migrate
 Required:
 
 ```env
-OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4o-mini
 ```
 
@@ -71,10 +71,11 @@ Optional (Langfuse):
 
 ```env
 LANGFUSE_ENABLED=true
-LANGFUSE_PUBLIC_KEY=...
-LANGFUSE_SECRET_KEY=...
 LANGFUSE_BASE_URL=http://localhost:3001
 ```
+
+Per-user credentials are set in the Profile page (OpenAI, Langfuse).
+
 
 ---
 

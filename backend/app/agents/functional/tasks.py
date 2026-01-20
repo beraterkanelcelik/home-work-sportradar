@@ -4,6 +4,7 @@ Task functions for LangGraph Functional API.
 This module maintains backward compatibility by re-exporting tasks from the new modular structure.
 New code should import directly from app.agents.functional.tasks.* modules.
 """
+
 # Re-export all functions from new modular structure
 from app.agents.functional.tasks.supervisor import route_to_agent
 from app.agents.functional.tasks.agent import execute_agent, refine_with_tool_results
@@ -57,7 +58,7 @@ def generic_agent_task(
     messages: List[BaseMessage],
     user_id: Optional[int],
     model_name: Optional[str] = None,
-    config: Optional[RunnableConfig] = None
+    config: Optional[RunnableConfig] = None,
 ) -> AgentResponse:
     """
     Legacy wrapper for generic agent execution.
@@ -80,5 +81,6 @@ def generic_agent_task(
         messages=messages,
         user_id=user_id,
         model_name=model_name,
-        config=config
+        config=config,
+        api_key=None,
     )

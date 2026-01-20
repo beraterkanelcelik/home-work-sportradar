@@ -3,6 +3,7 @@ User model for account management.
 """
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from app.core.encryption import encrypt_value, decrypt_value
 
 
 class UserManager(BaseUserManager):
@@ -44,6 +45,26 @@ class User(AbstractUser):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Encrypted API keys (stored encrypted, never in plaintext)
+    _openai_api_key = models.TextField(
+        blank=True,
+        default='',
+        db_column='openai_api_key_encrypted',
+        help_text="Encrypted OpenAI API key"
+    )
+    _langfuse_public_key = models.TextField(
+        blank=True,
+        default='',
+        db_column='langfuse_public_key_encrypted',
+        help_text="Encrypted Langfuse public key"
+    )
+    _langfuse_secret_key = models.TextField(
+        blank=True,
+        default='',
+        db_column='langfuse_secret_key_encrypted',
+        help_text="Encrypted Langfuse secret key"
+    )
     
     # Use email as username
     USERNAME_FIELD = 'email'
@@ -72,13 +93,87 @@ class User(AbstractUser):
     def increment_token_usage(self, count=1):
         """
         Increment token usage count.
-        
+
         This method should be called whenever tokens are used. The count is cumulative
         and never decreases, ensuring accurate all-time token tracking even when
         individual chats or sessions are deleted.
-        
+
         Args:
             count: Number of tokens to add (default: 1)
         """
         self.token_usage_count += count
         self.save(update_fields=['token_usage_count'])
+
+    # Property accessors for encrypted API keys
+    @property
+    def openai_api_key(self) -> str:
+        """Get decrypted OpenAI API key."""
+        if not self._openai_api_key:
+            return ''
+        try:
+            return decrypt_value(self._openai_api_key)
+        except ValueError:
+            return ''
+
+    @openai_api_key.setter
+    def openai_api_key(self, value: str):
+        """Set and encrypt OpenAI API key."""
+        if not value:
+            self._openai_api_key = ''
+        else:
+            self._openai_api_key = encrypt_value(value)
+
+    @property
+    def langfuse_public_key(self) -> str:
+        """Get decrypted Langfuse public key."""
+        if not self._langfuse_public_key:
+            return ''
+        try:
+            return decrypt_value(self._langfuse_public_key)
+        except ValueError:
+            return ''
+
+    @langfuse_public_key.setter
+    def langfuse_public_key(self, value: str):
+        """Set and encrypt Langfuse public key."""
+        if not value:
+            self._langfuse_public_key = ''
+        else:
+            self._langfuse_public_key = encrypt_value(value)
+
+    @property
+    def langfuse_secret_key(self) -> str:
+        """Get decrypted Langfuse secret key."""
+        if not self._langfuse_secret_key:
+            return ''
+        try:
+            return decrypt_value(self._langfuse_secret_key)
+        except ValueError:
+            return ''
+
+    @langfuse_secret_key.setter
+    def langfuse_secret_key(self, value: str):
+        """Set and encrypt Langfuse secret key."""
+        if not value:
+            self._langfuse_secret_key = ''
+        else:
+            self._langfuse_secret_key = encrypt_value(value)
+
+    def has_custom_openai_key(self) -> bool:
+        """Check if user has a custom OpenAI API key set."""
+        return bool(self._openai_api_key)
+
+    def has_custom_langfuse_keys(self) -> bool:
+        """Check if user has both Langfuse keys set."""
+        return bool(self._langfuse_public_key and self._langfuse_secret_key)
+
+    def clear_api_keys(self):
+        """Clear all custom API keys."""
+        self._openai_api_key = ''
+        self._langfuse_public_key = ''
+        self._langfuse_secret_key = ''
+        self.save(update_fields=[
+            '_openai_api_key',
+            '_langfuse_public_key',
+            '_langfuse_secret_key'
+        ])

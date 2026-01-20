@@ -3,39 +3,48 @@ Agent execution and event streaming using LangGraph Functional API.
 
 This module provides AgentRunner class for streaming execution via SSE (Server-Sent Events).
 """
+
 import uuid
-import os
 import asyncio
+import os
 from typing import Dict, Any, Iterator, Optional, List, AsyncIterator, Callable
+
+
 from app.agents.functional.workflow import ai_agent_workflow_events
 from app.agents.functional.models import AgentRequest, AgentResponse
 from app.agents.config import LANGCHAIN_TRACING_V2, LANGCHAIN_PROJECT, LANGFUSE_ENABLED
 from app.core.logging import get_logger
-from app.observability.tracing import prepare_trace_context, flush_traces
+from app.agents.api_key_context import APIKeyContext
+from app.observability.tracing import (
+    prepare_trace_context,
+    flush_traces,
+    get_langfuse_client_for_user,
+)
+
 
 logger = get_logger(__name__)
 
 # Enable LangSmith tracing if configured (optional, for compatibility)
 if LANGCHAIN_TRACING_V2:
-    os.environ['LANGCHAIN_TRACING_V2'] = 'true'
-    os.environ['LANGCHAIN_PROJECT'] = LANGCHAIN_PROJECT
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
 
 
 def serialize_response(response: AgentResponse) -> Dict[str, Any]:
     """
     Serialize AgentResponse to dict for JSON transport.
-    
+
     Args:
         response: AgentResponse object or None
-        
+
     Returns:
         Dictionary representation of the response, or None if response is None
     """
     if response is None:
         return None
-    if hasattr(response, 'model_dump'):
+    if hasattr(response, "model_dump"):
         return response.model_dump()
-    elif hasattr(response, 'dict'):
+    elif hasattr(response, "dict"):
         return response.dict()
     elif isinstance(response, dict):
         return response
@@ -46,10 +55,10 @@ def serialize_response(response: AgentResponse) -> Dict[str, Any]:
 class AgentRunner:
     """
     Runner for agent execution that handles streaming via SSE (Server-Sent Events).
-    
+
     Uses the stream() method to generate events that are published to Redis for real-time streaming.
     """
-    
+
     def __init__(
         self,
         user_id: int,
@@ -63,11 +72,11 @@ class AgentRunner:
         app_roles: Optional[List[str]] = None,
         resume_payload: Optional[Any] = None,
         run_id: Optional[str] = None,
-        parent_message_id: Optional[int] = None
+        parent_message_id: Optional[int] = None,
     ):
         """
         Initialize the agent runner.
-        
+
         Args:
             user_id: User ID
             chat_session_id: Chat session ID
@@ -86,23 +95,35 @@ class AgentRunner:
         self.plan_steps = plan_steps
         self.flow = flow
         self.resume_payload = resume_payload
-        
+
         # Generate trace ID if not provided
+        api_key_ctx = APIKeyContext.from_user(user_id)
+
         if trace_id:
             self.trace_id = trace_id
         else:
-            from langfuse import get_client
-            langfuse = get_client() if LANGFUSE_ENABLED else None
+            langfuse = None
+            if (
+                LANGFUSE_ENABLED
+                and api_key_ctx.langfuse_public_key
+                and api_key_ctx.langfuse_secret_key
+            ):
+                langfuse = get_langfuse_client_for_user(
+                    api_key_ctx.langfuse_public_key,
+                    api_key_ctx.langfuse_secret_key,
+                )
+
             if langfuse:
                 trace_seed = f"{chat_session_id}-{user_id}-{uuid.uuid4()}"
                 self.trace_id = langfuse.create_trace_id(seed=trace_seed)
             else:
                 self.trace_id = str(uuid.uuid4())
-        
+
         # Build request or Command for resume
         # If resume_payload is provided, use Command(resume=...) instead of AgentRequest
         if resume_payload is not None:
             from langgraph.types import Command
+
             self.request = Command(resume=resume_payload)
         else:
             self.request = AgentRequest(
@@ -117,8 +138,11 @@ class AgentRunner:
                 trace_id=self.trace_id,
                 run_id=run_id,
                 parent_message_id=parent_message_id,
+                openai_api_key=api_key_ctx.openai_api_key,
+                langfuse_public_key=api_key_ctx.langfuse_public_key,
+                langfuse_secret_key=api_key_ctx.langfuse_secret_key,
             )
-        
+
         # Prepare trace context
         self.trace_context = None
         if LANGFUSE_ENABLED:
@@ -128,16 +152,16 @@ class AgentRunner:
                 metadata={
                     "chat_session_id": chat_session_id,
                     "trace_id": self.trace_id,
-            }
-        )
-    
+                },
+            )
+
     async def execute(self) -> AsyncIterator[Dict[str, Any]]:
         """
         Single execution pipeline - yields all events from ai_agent_workflow_events().
-        
+
         This is the unified event source for both stream and non-stream modes.
         The difference is only in how events are delivered (forwarded vs aggregated).
-        
+
         Yields:
             Event dictionaries with type and data
         """
@@ -146,7 +170,7 @@ class AgentRunner:
                 self.request,
                 session_id=self.chat_session_id,
                 user_id=self.user_id,
-                trace_id=self.trace_id
+                trace_id=self.trace_id,
             ):
                 yield event
                 if event.get("type") in ("final", "interrupt", "error"):
@@ -154,23 +178,25 @@ class AgentRunner:
         except Exception as e:
             logger.error(
                 f"Error in AgentRunner.execute for user {self.user_id}, session {self.chat_session_id}: {e}",
-                exc_info=True
+                exc_info=True,
             )
             yield {"type": "error", "error": str(e)}
-    
-    async def stream(self, emit: Optional[Callable[[Dict[str, Any]], None]] = None) -> AsyncIterator[Dict[str, Any]]:
+
+    async def stream(
+        self, emit: Optional[Callable[[Dict[str, Any]], None]] = None
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Stream agent execution events.
-        
+
         Args:
             emit: Optional callback function to call for each event (for Temporal/Redis)
-            
+
         Yields:
             Event dictionaries with type and data
         """
         accumulated_content = ""
         tokens_used = 0
-        
+
         try:
             # Execute workflow
             # Pass session_id, user_id, trace_id separately to handle Command type
@@ -179,7 +205,7 @@ class AgentRunner:
                 self.request,
                 session_id=self.chat_session_id,
                 user_id=self.user_id,
-                trace_id=self.trace_id
+                trace_id=self.trace_id,
             ):
                 event_type = event.get("type", "unknown")
 
@@ -197,7 +223,7 @@ class AgentRunner:
                 # Check for terminal events
                 if event_type == "final":
                     response = event.get("response")
-                    if response and hasattr(response, 'token_usage'):
+                    if response and hasattr(response, "token_usage"):
                         tokens_used = response.token_usage.get("total_tokens", 0)
                     break
                 elif event_type == "interrupt":
@@ -205,11 +231,11 @@ class AgentRunner:
                     break
                 elif event_type == "error":
                     break
-            
+
             # Flush traces if enabled
             if LANGFUSE_ENABLED:
                 flush_traces()
-            
+
             # Yield completion event
             yield {
                 "type": "done",
@@ -217,25 +243,25 @@ class AgentRunner:
                     "final_text": accumulated_content,
                     "tokens_used": tokens_used,
                     "trace_id": self.trace_id,
-                }
+                },
             }
-            
+
         except Exception as e:
             logger.error(
                 f"Error in AgentRunner.stream for user {self.user_id}, session {self.chat_session_id}: {e}",
-                exc_info=True
+                exc_info=True,
             )
-            
+
             # Flush traces even on error
             if LANGFUSE_ENABLED:
                 flush_traces()
-            
+
             yield {
                 "type": "error",
                 "data": {
                     "error": str(e),
                     "trace_id": self.trace_id,
-                }
+                },
             }
 
 
@@ -243,25 +269,26 @@ class AgentRunner:
 # API Layer Functions
 # ============================================================================
 
+
 async def stream_agent_events_async(
     user_id: int,
     chat_session_id: int,
     message: str,
     plan_steps: Optional[List[Dict[str, Any]]] = None,
-    flow: str = "main"
+    flow: str = "main",
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream agent execution events using event-based workflow.
-    
+
     This is the API layer switch point for streaming execution.
-    
+
     Args:
         user_id: User ID
         chat_session_id: Chat session ID
         message: User message
         plan_steps: Optional plan steps
         flow: Flow type
-        
+
     Yields:
         Event dictionaries with type and data
     """
@@ -270,11 +297,13 @@ async def stream_agent_events_async(
         chat_session_id=chat_session_id,
         message=message,
         plan_steps=plan_steps,
-        flow=flow
+        flow=flow,
     )
-    
-    logger.info(f"Streaming agent events for user {user_id}, session {chat_session_id}, trace: {runner.trace_id}, flow: {flow}")
-    
+
+    logger.info(
+        f"Streaming agent events for user {user_id}, session {chat_session_id}, trace: {runner.trace_id}, flow: {flow}"
+    )
+
     # Stream events
     async for event in runner.stream():
         yield event

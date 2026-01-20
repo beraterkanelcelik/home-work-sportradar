@@ -3,6 +3,7 @@ Generic agent registry for unified agent management.
 
 This module now uses AgentFactory for agent creation, maintaining backward compatibility.
 """
+
 from typing import Optional
 from app.agents.agents.base import BaseAgent
 from app.agents.config import OPENAI_MODEL
@@ -15,7 +16,8 @@ logger = get_logger(__name__)
 def get_agent(
     agent_name: str,
     user_id: Optional[int] = None,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> BaseAgent:
     """
     Get agent instance using AgentFactory (backward compatibility wrapper).
@@ -33,15 +35,19 @@ def get_agent(
     """
     # Normalize inputs
     model_name = model_name or OPENAI_MODEL
-    
+
     # Use factory to create agent (prefer create() over get_cached() for correctness)
     try:
         agent = AgentFactory.create(
             agent_name=agent_name,
             user_id=user_id,
-            model_name=model_name
+            model_name=model_name,
+            api_key=api_key,
         )
-        logger.debug(f"Created agent via factory: {agent_name} (user_id={user_id}, model={model_name})")
+
+        logger.debug(
+            f"Created agent via factory: {agent_name} (user_id={user_id}, model={model_name})"
+        )
         return agent
     except ValueError as e:
         logger.error(f"Failed to create agent {agent_name}: {e}")

@@ -14,21 +14,20 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/extensions.sql:/docker-entrypoint-initdb.d/extensions.sql:ro
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    # PostgreSQL configuration via command-line flags (simpler and more reliable)
-    # Settings are optimized for 4GB container with high concurrency
+    # PostgreSQL configuration - optimized for low memory (1.5GB container)
     command: >
       postgres
-      -c shared_buffers=1GB
-      -c effective_cache_size=2GB
-      -c maintenance_work_mem=256MB
-      -c work_mem=32MB
-      -c max_connections=500
-      -c max_worker_processes=8
-      -c max_parallel_workers_per_gather=4
-      -c max_parallel_workers=8
-      -c wal_buffers=16MB
-      -c min_wal_size=1GB
-      -c max_wal_size=4GB
+      -c shared_buffers=256MB
+      -c effective_cache_size=512MB
+      -c maintenance_work_mem=64MB
+      -c work_mem=8MB
+      -c max_connections=100
+      -c max_worker_processes=2
+      -c max_parallel_workers_per_gather=1
+      -c max_parallel_workers=2
+      -c wal_buffers=8MB
+      -c min_wal_size=256MB
+      -c max_wal_size=1GB
       -c checkpoint_completion_target=0.9
       -c statement_timeout=30s
       -c lock_timeout=10s
@@ -41,40 +40,9 @@ services:
     restart: unless-stopped
     networks:
       - app-network
-    # Memory limits for database - increased to 4GB for scalability
-    mem_limit: 4g
-    mem_reservation: 2g
-
-  # PgBouncer Connection Pooler
-  pgbouncer:
-    image: edoburu/pgbouncer:latest
-    container_name: pgbouncer
-    ports:
-      - "6432:6432"
-    environment:
-      - DATABASE_URL=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-ai_agents_db}
-      - POOL_MODE=transaction
-      - MAX_CLIENT_CONN=1000
-      - DEFAULT_POOL_SIZE=50
-      - RESERVE_POOL_SIZE=10
-      - RESERVE_POOL_TIMEOUT=5
-      - SERVER_IDLE_TIMEOUT=600
-      - SERVER_LIFETIME=3600
-      - AUTH_TYPE=plain
-    volumes:
-      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -p 6432 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks:
-      - app-network
+    # Memory limits for database - optimized for 6-8GB RAM system
+    mem_limit: 1536m
+    mem_reservation: 512m
 
   # Django Backend
   backend:
@@ -89,11 +57,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=True
-      - DB_HOST=pgbouncer
+      - DB_HOST=db
       - DB_NAME=${DB_NAME:-ai_agents_db}
       - DB_USER=${DB_USER:-postgres}
       - DB_PASSWORD=${DB_PASSWORD:-postgres}
-      - DB_PORT=6432
+      - DB_PORT=5432
       # Limit Python memory usage
       - PYTHONHASHSEED=0
       - MALLOC_ARENA_MAX=2
@@ -109,8 +77,6 @@ services:
       - /app/*.pyc
       - /app/**/*.pyc
     depends_on:
-      pgbouncer:
-        condition: service_healthy
       db:
         condition: service_healthy
     restart: unless-stopped
@@ -118,10 +84,7 @@ services:
     tty: true
     networks:
       - app-network
-    # Memory limits (reduced from 2g to 1g to save RAM)
-    mem_limit: 1g
-    mem_reservation: 512m
-    # Hot-reload disabled - restart container manually for code changes
+    # No memory limit - let Docker manage based on available resources
     # Wait for database to be ready, then run migrations and start server
     command: sh -c "python wait_for_db.py && python manage.py migrate --noinput && uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 1 --limit-max-requests 1000"
 
@@ -137,8 +100,8 @@ services:
       # VITE_API_URL is optional - if not set, frontend will use same hostname as browser with port 8000
       # This allows dynamic API URL detection for Twingate/remote access
       - VITE_API_URL=${VITE_API_URL:-}
-      # Node.js memory limit (lowered to 512MB to reduce pressure during startup)
-      - NODE_OPTIONS=--max-old-space-size=512
+      # Node.js memory limit - reduced for low memory system
+      - NODE_OPTIONS=--max-old-space-size=256
     volumes:
       # Mount code for development (hot reload enabled)
       - ./frontend:/app
@@ -151,9 +114,9 @@ services:
     restart: unless-stopped
     networks:
       - app-network
-    # Memory limits (reduced from 2g to 1g to save RAM)
-    mem_limit: 1g
-    mem_reservation: 512m
+    # Memory limits - optimized for 6-8GB RAM system
+    mem_limit: 384m
+    mem_reservation: 192m
 
   # Nginx (Reverse Proxy - Optional for production)
   nginx:
@@ -179,8 +142,8 @@ services:
     image: docker.io/langfuse/langfuse-worker:3
     container_name: agent-playground-langfuse-worker
     restart: always
-    mem_limit: 512m
-    mem_reservation: 256m
+    mem_limit: 256m
+    mem_reservation: 128m
     depends_on:
       db:
         condition: service_healthy
@@ -242,14 +205,13 @@ services:
     networks:
       - app-network
 
-  # Langfuse Web UI - DISABLED due to OOM (JavaScript heap out of memory)
-  # Langfuse Web UI - Re-enabled with 1GB memory limit to prevent crashes
+  # Langfuse Web UI - optimized for low memory
   langfuse-web:
     image: docker.io/langfuse/langfuse:3
     container_name: agent-playground-langfuse-web
     restart: always
-    mem_limit: 1g
-    mem_reservation: 512m
+    mem_limit: 512m
+    mem_reservation: 256m
     depends_on:
       db:
         condition: service_healthy
@@ -325,8 +287,8 @@ services:
     image: docker.io/clickhouse/clickhouse-server
     container_name: agent-playground-clickhouse
     restart: always
-    mem_limit: 1g
-    mem_reservation: 512m
+    mem_limit: 384m
+    mem_reservation: 192m
     user: "101:101"
     environment:
       CLICKHOUSE_DB: default
@@ -351,8 +313,8 @@ services:
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     container_name: agent-playground-minio
     restart: always
-    mem_limit: 256m
-    mem_reservation: 128m
+    mem_limit: 128m
+    mem_reservation: 64m
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
@@ -375,11 +337,12 @@ services:
     image: docker.io/redis:7
     container_name: redis
     restart: always
-    mem_limit: 256m
-    mem_reservation: 128m
+    mem_limit: 128m
+    mem_reservation: 64m
     command: >
       --requirepass ${REDIS_AUTH:-myredissecret}
-      --maxmemory-policy noeviction
+      --maxmemory 100mb
+      --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     healthcheck:
@@ -395,8 +358,8 @@ services:
     image: temporalio/auto-setup:1.23
     container_name: temporal
     restart: unless-stopped
-    mem_limit: 768m
-    mem_reservation: 256m
+    mem_limit: 384m
+    mem_reservation: 192m
     depends_on:
       db:
         condition: service_healthy
@@ -423,8 +386,8 @@ services:
     image: temporalio/ui:2.44.0
     container_name: agent-playground-temporal-ui
     restart: unless-stopped
-    mem_limit: 128m
-    mem_reservation: 64m
+    mem_limit: 96m
+    mem_reservation: 48m
     depends_on:
       temporal:
         condition: service_healthy
@@ -447,8 +410,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      pgbouncer:
-        condition: service_healthy
       db:
         condition: service_healthy
     env_file:
@@ -456,11 +417,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=True
-      - DB_HOST=pgbouncer
+      - DB_HOST=db
       - DB_NAME=${DB_NAME:-ai_agents_db}
       - DB_USER=${DB_USER:-postgres}
       - DB_PASSWORD=${DB_PASSWORD:-postgres}
-      - DB_PORT=6432
+      - DB_PORT=5432
       - TEMPORAL_ADDRESS=temporal:7233
       - REDIS_URL=redis://redis:6379
       - REDIS_AUTH=${REDIS_AUTH:-myredissecret}
@@ -475,9 +436,9 @@ services:
       - /app/__pycache__
     networks:
       - app-network
-    # Memory limits (reduced from 2g to 1g to save RAM)
-    mem_limit: 1g
-    mem_reservation: 512m
+    # Memory limits - optimized for 6-8GB RAM system
+    mem_limit: 512m
+    mem_reservation: 256m
     # Wait for database before starting worker
     command: sh -c "python wait_for_db.py && python -m app.agents.temporal.worker"
 

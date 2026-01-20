@@ -1,6 +1,7 @@
 """
 Greeter agent for welcoming users and providing guidance.
 """
+
 from typing import List, Optional
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
@@ -14,16 +15,22 @@ class GreeterAgent(BaseAgent):
     """
     Agent that provides welcome messages and guidance to users.
     """
-    
-    def __init__(self, user_id: Optional[int] = None, model_name: Optional[str] = None):
+
+    def __init__(
+        self,
+        user_id: Optional[int] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
         super().__init__(
             name="greeter",
             description="Provides welcome messages, guidance, and helps users get started",
             temperature=0.7,
-            model_name=model_name
+            model_name=model_name,
+            api_key=api_key,
         )
         self.user_id = user_id
-    
+
     def get_system_prompt(self) -> str:
         """Get system prompt for greeter agent."""
         return """You are a friendly and helpful greeter agent. Your role is to:
@@ -46,28 +53,30 @@ Examples:
 
 Keep responses helpful and encouraging. If the user asks about specific features or agents, 
 you can mention that the supervisor will route them to the appropriate agent."""
-    
+
     def get_tools(self) -> List[BaseTool]:
         """Get tools available to greeter agent."""
         tools = []
-        
+
         # Add RAG tool if user_id is available
         if self.user_id:
             try:
                 from app.agents.tools.rag_tool import create_rag_tool
+
                 rag_tool = create_rag_tool(self.user_id)
                 tools.append(rag_tool)
                 logger.debug(f"Added RAG tool to greeter agent for user {self.user_id}")
             except Exception as e:
                 logger.warning(f"Failed to add RAG tool to greeter agent: {e}")
-        
+
         # Add time tool (requires approval)
         try:
             from app.agents.tools.time_tool import TimeTool
+
             time_tool_instance = TimeTool()
             tools.append(time_tool_instance.get_tool())
             logger.debug("Added time tool to greeter agent")
         except Exception as e:
             logger.warning(f"Failed to add time tool to greeter agent: {e}")
-        
+
         return tools

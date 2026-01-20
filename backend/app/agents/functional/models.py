@@ -1,12 +1,14 @@
 """
 Pydantic models for Functional API request/response.
 """
+
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Literal
 
 
 class AgentRequest(BaseModel):
     """Input request for the agent."""
+
     query: str
     session_id: Optional[int] = None
     org_slug: Optional[str] = None
@@ -16,13 +18,21 @@ class AgentRequest(BaseModel):
     flow: str = "main"  # main, direct, plan
     plan_steps: Optional[List[Dict[str, Any]]] = None  # For plan execution
     trace_id: Optional[str] = None  # Langfuse trace ID for tracing
-    approved_tool_results: Optional[Dict[str, Any]] = None  # Human-in-the-loop: approved tool results (tool_call_id -> result)
-    run_id: Optional[str] = None  # Correlation ID for /run polling (ensures correct message under concurrency)
+    approved_tool_results: Optional[Dict[str, Any]] = (
+        None  # Human-in-the-loop: approved tool results (tool_call_id -> result)
+    )
+    run_id: Optional[str] = (
+        None  # Correlation ID for /run polling (ensures correct message under concurrency)
+    )
     parent_message_id: Optional[int] = None  # Parent user message ID for correlation
+    openai_api_key: Optional[str] = None  # Per-user OpenAI API key
+    langfuse_public_key: Optional[str] = None  # Per-user Langfuse public key
+    langfuse_secret_key: Optional[str] = None  # Per-user Langfuse secret key
 
 
 class ToolProposal(BaseModel):
     """Tool execution proposal."""
+
     tool: str
     props: Dict[str, Any]
     query: str = ""
@@ -30,6 +40,7 @@ class ToolProposal(BaseModel):
 
 class RoutingDecision(BaseModel):
     """Supervisor routing decision (backward compatible format)."""
+
     agent: Literal["greeter", "gmail", "config", "search", "process"]
     query: str
     require_clarification: bool = False
@@ -41,6 +52,7 @@ class RoutingDecision(BaseModel):
 
 class ToolResult(BaseModel):
     """Tool execution result."""
+
     tool: str
     args: Dict[str, Any]
     output: Any
@@ -50,6 +62,7 @@ class ToolResult(BaseModel):
 
 class AgentResponse(BaseModel):
     """Final agent response."""
+
     type: Literal["answer", "plan_proposal"] = "answer"
     reply: Optional[str] = None
     tool_calls: List[Dict[str, Any]] = []

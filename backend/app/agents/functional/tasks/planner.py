@@ -4,6 +4,7 @@ Planning agent task for generating execution plans.
 This module provides LangGraph task for analyzing queries and generating
 structured plans for multi-step operations.
 """
+
 import json
 from typing import List, Dict, Any, Optional
 from langgraph.func import task
@@ -92,7 +93,7 @@ Remember: Only output valid JSON, nothing else."""
 def analyze_and_plan(
     messages: List[BaseMessage],
     user_id: Optional[int] = None,
-    config: Optional[RunnableConfig] = None
+    config: Optional[RunnableConfig] = None,
 ) -> Dict[str, Any]:
     """
     Analyze query and generate execution plan if needed.
@@ -116,34 +117,42 @@ def analyze_and_plan(
 
         # Get planning agent (uses Claude with structured output)
         from app.agents.factory import AgentFactory
-        planning_agent = AgentFactory.create("planner", user_id=user_id)
+
+        api_key = None
+        if isinstance(config, dict):
+            api_key = config.get("api_key")
+
+        planning_agent = AgentFactory.create(
+            "planner",
+            user_id=user_id,
+            api_key=api_key,
+        )
 
         # Build planning messages with system prompt
-        planning_messages = [
-            SystemMessage(content=PLANNING_SYSTEM_PROMPT),
-            *messages
-        ]
+        planning_messages = [SystemMessage(content=PLANNING_SYSTEM_PROMPT), *messages]
 
-        logger.debug(f"[PLANNING] Invoking planning agent with {len(messages)} messages")
+        logger.debug(
+            f"[PLANNING] Invoking planning agent with {len(messages)} messages"
+        )
 
         # Invoke agent to get plan
         # IMPORTANT: Remove callbacks to prevent streaming during planning
         # Planning should be silent - only the final plan proposal should be shown to user
         planning_config = {**config} if config else {}
-        if 'callbacks' in planning_config:
-            planning_config['callbacks'] = []  # Disable streaming callbacks
+        if "callbacks" in planning_config:
+            planning_config["callbacks"] = []  # Disable streaming callbacks
 
         response = planning_agent.invoke(planning_messages, config=planning_config)
 
         # Parse structured output from response
-        if hasattr(response, 'content'):
+        if hasattr(response, "content"):
             content = response.content
 
             # Try to extract JSON from markdown code blocks if present
-            if '```json' in content:
-                content = content.split('```json')[1].split('```')[0].strip()
-            elif '```' in content:
-                content = content.split('```')[1].split('```')[0].strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
 
             result = json.loads(content)
         else:
@@ -152,21 +161,29 @@ def analyze_and_plan(
 
         # Validate response structure
         if not isinstance(result, dict):
-            logger.warning("[PLANNING] Response is not a dict, treating as no plan needed")
-            return {"requires_plan": False, "reasoning": "Invalid response format", "plan": []}
+            logger.warning(
+                "[PLANNING] Response is not a dict, treating as no plan needed"
+            )
+            return {
+                "requires_plan": False,
+                "reasoning": "Invalid response format",
+                "plan": [],
+            }
 
-        requires_plan = result.get('requires_plan', False)
-        plan_steps = result.get('plan', [])
-        reasoning = result.get('reasoning', '')
+        requires_plan = result.get("requires_plan", False)
+        plan_steps = result.get("plan", [])
+        reasoning = result.get("reasoning", "")
 
-        logger.info(f"[PLANNING] Analysis complete: requires_plan={requires_plan}, steps={len(plan_steps)}")
+        logger.info(
+            f"[PLANNING] Analysis complete: requires_plan={requires_plan}, steps={len(plan_steps)}"
+        )
         logger.debug(f"[PLANNING] Reasoning: {reasoning}")
 
         if requires_plan and plan_steps:
             logger.info(f"[PLANNING] Generated plan with {len(plan_steps)} steps")
             for idx, step in enumerate(plan_steps):
-                action = step.get('action', 'unknown')
-                tool = step.get('tool', step.get('answer', 'N/A'))
+                action = step.get("action", "unknown")
+                tool = step.get("tool", step.get("answer", "N/A"))
                 logger.debug(f"[PLANNING] Step {idx + 1}: {action} - {tool}")
 
         return result
@@ -176,12 +193,12 @@ def analyze_and_plan(
         return {
             "requires_plan": False,
             "reasoning": f"Failed to parse planning response: {str(e)}",
-            "plan": []
+            "plan": [],
         }
     except Exception as e:
         logger.error(f"[PLANNING] Error in planning agent: {e}", exc_info=True)
         return {
             "requires_plan": False,
             "reasoning": f"Planning failed: {str(e)}",
-            "plan": []
+            "plan": [],
         }

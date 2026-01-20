@@ -1,6 +1,7 @@
 """
 RAG query endpoint.
 """
+
 import json
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -17,7 +18,7 @@ logger = get_logger(__name__)
 def rag_query(request):
     """
     Query RAG pipeline.
-    
+
     Request body:
     {
         "query": "search query",
@@ -25,7 +26,7 @@ def rag_query(request):
         "top_n": 8,   # optional
         "document_ids": [1, 2]  # optional, filter by specific documents
     }
-    
+
     Returns:
     {
         "items": [
@@ -49,32 +50,33 @@ def rag_query(request):
     """
     user = get_current_user(request)
     if not user:
-        return JsonResponse({'error': 'Authentication required'}, status=401)
-    
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
     try:
         data = json.loads(request.body)
-        query = data.get('query', '').strip()
-        
+        query = data.get("query", "").strip()
+
         if not query:
-            return JsonResponse({'error': 'Query is required'}, status=400)
-        
-        top_k = data.get('top_k')
-        top_n = data.get('top_n')
-        document_ids = data.get('document_ids')
-        
+            return JsonResponse({"error": "Query is required"}, status=400)
+
+        top_k = data.get("top_k")
+        top_n = data.get("top_n")
+        document_ids = data.get("document_ids")
+
         # Query RAG pipeline
         result = query_rag(
             user_id=user.id,
             query=query,
             top_k=top_k,
             top_n=top_n,
-            document_ids=document_ids
+            document_ids=document_ids,
+            api_key=user.openai_api_key,
         )
-        
+
         return JsonResponse(result)
-    
+
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         logger.error(f"Error in RAG query: {str(e)}")
-        return JsonResponse({'error': f'Query failed: {str(e)}'}, status=500)
+        return JsonResponse({"error": f"Query failed: {str(e)}"}, status=500)

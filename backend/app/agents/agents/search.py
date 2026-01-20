@@ -1,6 +1,7 @@
 """
 Search agent for document search and Q&A using RAG.
 """
+
 from typing import List, Optional
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
@@ -14,16 +15,22 @@ class SearchAgent(BaseAgent):
     """
     Agent that specializes in document search and Q&A using RAG.
     """
-    
-    def __init__(self, user_id: Optional[int] = None, model_name: Optional[str] = None):
+
+    def __init__(
+        self,
+        user_id: Optional[int] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
         super().__init__(
             name="search",
             description="Searches through documents and answers questions using RAG",
             temperature=0.7,
-            model_name=model_name
+            model_name=model_name,
+            api_key=api_key,
         )
         self.user_id = user_id
-    
+
     def get_system_prompt(self) -> str:
         """Get system prompt for search agent."""
         return """You are a search agent specialized in finding and answering questions from user-uploaded documents.
@@ -45,28 +52,30 @@ Examples:
 - User: "What's in document Y?" → Use rag_retrieval_tool with query="Y" or document_ids=["Y"]
 
 Be thorough in your searches and provide comprehensive answers based on the retrieved context."""
-    
+
     def get_tools(self) -> List[BaseTool]:
         """Get tools available to search agent."""
         tools = []
-        
+
         # Add RAG tool if user_id is available
         if self.user_id:
             try:
                 from app.agents.tools.rag_tool import create_rag_tool
-                rag_tool = create_rag_tool(self.user_id)
+
+                rag_tool = create_rag_tool(self.user_id, api_key=self._api_key)
                 tools.append(rag_tool)
                 logger.debug(f"Added RAG tool to search agent for user {self.user_id}")
             except Exception as e:
                 logger.warning(f"Failed to add RAG tool to search agent: {e}")
-        
+
         # Add time tool (requires approval)
         try:
             from app.agents.tools.time_tool import TimeTool
+
             time_tool_instance = TimeTool()
             tools.append(time_tool_instance.get_tool())
             logger.debug("Added time tool to search agent")
         except Exception as e:
             logger.warning(f"Failed to add time tool to search agent: {e}")
-        
+
         return tools

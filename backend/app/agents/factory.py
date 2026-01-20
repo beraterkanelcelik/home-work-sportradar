@@ -1,6 +1,7 @@
 """
 Agent factory for creating agents with proper lifecycle management.
 """
+
 from functools import lru_cache
 from typing import Optional, Type, Dict
 from langchain_core.runnables import RunnableConfig
@@ -12,32 +13,33 @@ logger = get_logger(__name__)
 
 class AgentFactory:
     """Factory for creating agents with proper lifecycle."""
-    
+
     _registry: Dict[str, Type[BaseAgent]] = {}
-    
+
     @classmethod
     def register(cls, name: str, agent_class: Type[BaseAgent]):
         """Register an agent class."""
         cls._registry[name] = agent_class
         logger.debug(f"Registered agent: {name} -> {agent_class.__name__}")
-    
+
     @classmethod
     def create(
         cls,
         agent_name: str,
         user_id: Optional[int] = None,
         model_name: Optional[str] = None,
-        config: Optional[RunnableConfig] = None
+        api_key: Optional[str] = None,
+        config: Optional[RunnableConfig] = None,
     ) -> BaseAgent:
         """
         Create agent instance (not cached - agents are lightweight).
-        
+
         Args:
             agent_name: Name of agent to create
             user_id: Optional user ID
             model_name: Optional model name
             config: Optional runtime config (unused, kept for compatibility)
-            
+
         Returns:
             Agent instance
         """
@@ -46,30 +48,33 @@ class AgentFactory:
             logger.warning(f"Unknown agent: {agent_name}, using greeter")
             agent_class = cls._registry.get("greeter")
             if not agent_class:
-                raise ValueError(f"Agent '{agent_name}' not found and no fallback available")
-        
-        return agent_class(user_id=user_id, model_name=model_name)
-    
+                raise ValueError(
+                    f"Agent '{agent_name}' not found and no fallback available"
+                )
+
+        return agent_class(user_id=user_id, model_name=model_name, api_key=api_key)
+
     @classmethod
     @lru_cache(maxsize=32)
     def get_cached(
         cls,
         agent_name: str,
         user_id: Optional[int] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
     ) -> BaseAgent:
         """
         Get cached agent (use sparingly - prefer create()).
-        
+
         Args:
             agent_name: Name of agent
             user_id: Optional user ID
             model_name: Optional model name
-            
+
         Returns:
             Cached agent instance
         """
-        return cls.create(agent_name, user_id, model_name)
+        return cls.create(agent_name, user_id, model_name, api_key)
 
 
 # Auto-register agents on import

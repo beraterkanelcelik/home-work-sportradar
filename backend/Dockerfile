@@ -7,8 +7,7 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_SYSTEM_PYTHON=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,15 +15,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv for fast package installation
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies with uv (much faster than pip)
 # Install NumPy first with explicit version to ensure compatibility
 # NumPy 1.26.x doesn't have X86_V2 baseline by default, avoiding CPU compatibility issues
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir "numpy>=1.26.0,<2.0.0" && \
-    pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache "numpy>=1.26.0,<2.0.0" && \
+    uv pip install --system --no-cache -r requirements.txt
 
 # Copy application code
 COPY . /app

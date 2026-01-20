@@ -12,11 +12,11 @@ import psycopg
 def wait_for_db(max_retries=30, retry_delay=2):
     """
     Wait for database to be ready.
-    
+
     Args:
         max_retries: Maximum number of retry attempts
         retry_delay: Delay between retries in seconds
-        
+
     Returns:
         True if database is ready, False otherwise
     """
@@ -26,64 +26,38 @@ def wait_for_db(max_retries=30, retry_delay=2):
     db_user = os.getenv('DB_USER', 'postgres')
     db_password = os.getenv('DB_PASSWORD', 'postgres')
     db_name = os.getenv('DB_NAME', 'ai_agents_db')
-    
-    # When using PgBouncer, connect directly to target database (wildcard routing)
-    # When using direct PostgreSQL, try postgres DB first (always exists)
-    use_pgbouncer = db_host == 'pgbouncer' or db_port == 6432
-    
-    if use_pgbouncer:
-        # PgBouncer: connect directly to target database (wildcard * handles any DB)
-        db_config = {
-            'host': db_host,
-            'port': db_port,
-            'user': db_user,
-            'password': db_password,
-            'dbname': db_name,  # Connect directly to target DB
-            'connect_timeout': 5,
-        }
-    else:
-        # Direct PostgreSQL: try postgres DB first, then target DB
-        db_configs = [
-            {
-                'host': db_host,
-                'port': db_port,
-                'user': db_user,
-                'password': db_password,
-                'dbname': 'postgres',  # Connect to postgres DB first (always exists)
-                'connect_timeout': 5,
-            },
-            {
-                'host': db_host,
-                'port': db_port,
-                'user': db_user,
-                'password': db_password,
-                'dbname': db_name,  # Then check target DB
-                'connect_timeout': 5,
-            }
-        ]
-    
+
     print(f"Waiting for database at {db_host}:{db_port}...")
-    
+
     for attempt in range(1, max_retries + 1):
         try:
-            if use_pgbouncer:
-                # PgBouncer: single connection attempt
-                conn = psycopg.connect(**db_config)
+            # First check if PostgreSQL server is ready (connect to postgres DB)
+            conn = psycopg.connect(
+                host=db_host,
+                port=db_port,
+                user=db_user,
+                password=db_password,
+                dbname='postgres',
+                connect_timeout=5,
+            )
+            conn.close()
+
+            # Then check if target database exists and is accessible
+            try:
+                conn = psycopg.connect(
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=db_password,
+                    dbname=db_name,
+                    connect_timeout=5,
+                )
                 conn.close()
-            else:
-                # Direct PostgreSQL: check server first, then target DB
-                conn = psycopg.connect(**db_configs[0])
-                conn.close()
-                
-                # Then check if target database exists and is accessible
-                try:
-                    conn = psycopg.connect(**db_configs[1])
-                    conn.close()
-                except Exception:
-                    # Target DB might not exist yet, but server is ready
-                    # This is okay - migrations will create it
-                    pass
-            
+            except Exception:
+                # Target DB might not exist yet, but server is ready
+                # This is okay - migrations will create it
+                pass
+
             print(f"✓ Database is ready! (attempt {attempt}/{max_retries})")
             return True
         except (OperationalError, Exception) as e:
@@ -95,7 +69,7 @@ def wait_for_db(max_retries=30, retry_delay=2):
                 print(f"✗ Database failed to become ready after {max_retries} attempts")
                 print(f"  Last error: {e}")
                 return False
-    
+
     return False
 
 

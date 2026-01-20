@@ -1,6 +1,7 @@
 """
 Planner agent for multi-step task decomposition.
 """
+
 from typing import List, Optional
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
@@ -18,12 +19,18 @@ class PlannerAgent(BaseAgent):
     into sequential actions that can be executed by other agents.
     """
 
-    def __init__(self, user_id: Optional[int] = None, model_name: Optional[str] = None):
+    def __init__(
+        self,
+        user_id: Optional[int] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
         super().__init__(
             name="planner",
             description="Planning agent for multi-step task decomposition and execution planning",
             temperature=0.3,  # Lower temperature for more structured, consistent output
-            model_name=model_name
+            model_name=model_name,
+            api_key=api_key,
         )
         self.user_id = user_id
 
