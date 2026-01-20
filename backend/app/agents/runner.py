@@ -73,6 +73,7 @@ class AgentRunner:
         resume_payload: Optional[Any] = None,
         run_id: Optional[str] = None,
         parent_message_id: Optional[int] = None,
+        api_key_ctx: Optional["APIKeyContext"] = None,
     ):
         """
         Initialize the agent runner.
@@ -88,6 +89,7 @@ class AgentRunner:
             org_roles: Optional organization roles
             app_roles: Optional application roles
             resume_payload: Optional resume payload for LangGraph interrupt resume (Command(resume=...))
+            api_key_ctx: Optional pre-created APIKeyContext (for async callers)
         """
         self.user_id = user_id
         self.chat_session_id = chat_session_id
@@ -96,8 +98,9 @@ class AgentRunner:
         self.flow = flow
         self.resume_payload = resume_payload
 
-        # Generate trace ID if not provided
-        api_key_ctx = APIKeyContext.from_user(user_id)
+        # Use provided api_key_ctx or create one (sync call - use api_key_ctx param from async callers)
+        if api_key_ctx is None:
+            api_key_ctx = APIKeyContext.from_user(user_id)
 
         if trace_id:
             self.trace_id = trace_id

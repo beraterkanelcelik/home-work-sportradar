@@ -209,6 +209,10 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         # Send initial heartbeat
         activity.heartbeat({"status": "initialized", "chat_id": chat_id})
 
+        # Fetch API keys asynchronously (safe for async context)
+        from app.agents.api_key_context import APIKeyContext
+        api_key_ctx = await APIKeyContext.from_user_async(user_id)
+
         # Create root Langfuse trace if enabled (for activity-level tracing)
         trace_id = None
         langfuse_trace = None
@@ -217,11 +221,8 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         if LANGFUSE_ENABLED:
             try:
                 import uuid
-                from app.agents.api_key_context import APIKeyContext
                 from app.observability.tracing import get_langfuse_client_for_user
 
-                user_id = state.get("user_id")
-                api_key_ctx = APIKeyContext.from_user(user_id)
                 langfuse = None
                 if api_key_ctx.langfuse_public_key and api_key_ctx.langfuse_secret_key:
                     langfuse = get_langfuse_client_for_user(
@@ -283,6 +284,7 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             parent_message_id=state.get(
                 "parent_message_id"
             ),  # Parent message ID for correlation
+            api_key_ctx=api_key_ctx,  # Pass pre-created async context
         )
 
         if resume_payload:

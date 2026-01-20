@@ -78,3 +78,5 @@ langfuse-official-compose.yml
 
 # Documentation
 /docs/
+
+*.pdf
