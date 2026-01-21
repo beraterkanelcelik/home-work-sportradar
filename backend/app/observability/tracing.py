@@ -18,7 +18,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 # Thread-safe cache for Langfuse clients (keyed by public_key)
-_user_langfuse_clients: Dict[str, "Langfuse"] = {}
+_user_langfuse_clients: Dict[str, Any] = {}
 _user_callback_handlers: Dict[str, CallbackHandler] = {}
 _callback_failure_timestamps: Dict[str, float] = {}
 _client_lock = threading.Lock()
@@ -75,12 +75,16 @@ def get_callback_handler() -> Optional[CallbackHandler]:
 
 
 def get_callback_handler_for_user(
-    public_key: str, secret_key: str
+    public_key: str,
+    secret_key: str,
+    trace_id: Optional[str] = None,
 ) -> Optional[CallbackHandler]:
     """
     Get Langfuse CallbackHandler using cached client.
 
-    Reuses the cached Langfuse client to prevent memory leaks.
+    Reuses the cached Langfuse client to prevent memory leaks. If a trace_id
+    is provided, a new handler is created per trace to ensure correct
+    association with the current trace.
     """
     if not LANGFUSE_ENABLED:
         return None
@@ -88,58 +92,75 @@ def get_callback_handler_for_user(
         return None
 
     cache_key = public_key
+    use_cache = trace_id is None
 
     with _client_lock:
-        # Return cached handler if exists
-        if cache_key in _user_callback_handlers:
+        if use_cache and cache_key in _user_callback_handlers:
             return _user_callback_handlers[cache_key]
 
         last_failure = _callback_failure_timestamps.get(cache_key)
         if last_failure and (time.time() - last_failure) < _CALLBACK_FAILURE_TTL_SECONDS:
             return None
 
-        # Get or create client, then create handler
-        try:
-            handler_holder: Dict[str, Optional[CallbackHandler]] = {"handler": None}
-            error_holder: Dict[str, Optional[Exception]] = {"error": None}
+    trace_context = {"trace_id": trace_id} if trace_id else None
 
-            def _build_handler() -> None:
-                try:
-                    client = get_langfuse_client_for_user(public_key, secret_key)
-                    if not client:
-                        return
-                    handler_holder["handler"] = CallbackHandler(public_key=public_key)
-                except Exception as e:
-                    error_holder["error"] = e
-
-            worker = threading.Thread(target=_build_handler, daemon=True)
-            worker.start()
-            worker.join(_CALLBACK_HANDLER_TIMEOUT_SECONDS)
-
-            if worker.is_alive():
+    try:
+        client = get_langfuse_client_for_user(public_key, secret_key)
+        if not client:
+            with _client_lock:
                 _callback_failure_timestamps[cache_key] = time.time()
-                logger.warning(
-                    f"Langfuse CallbackHandler creation timed out after {_CALLBACK_HANDLER_TIMEOUT_SECONDS}s"
+            return None
+
+        handler_holder: Dict[str, Optional[CallbackHandler]] = {"handler": None}
+        error_holder: Dict[str, Optional[Exception]] = {"error": None}
+
+        def _build_handler() -> None:
+            try:
+                handler_holder["handler"] = CallbackHandler(
+                    public_key=public_key,
+                    trace_context=trace_context,
+                    update_trace=True,
                 )
-                return None
+            except Exception as e:
+                error_holder["error"] = e
 
-            if error_holder["error"]:
-                raise error_holder["error"]
+        worker = threading.Thread(target=_build_handler, daemon=True)
+        worker.start()
+        worker.join(_CALLBACK_HANDLER_TIMEOUT_SECONDS)
 
-            handler = handler_holder["handler"]
-            if handler is None:
+        if worker.is_alive():
+            with _client_lock:
                 _callback_failure_timestamps[cache_key] = time.time()
-                return None
+            logger.warning(
+                f"Langfuse CallbackHandler creation timed out after {_CALLBACK_HANDLER_TIMEOUT_SECONDS}s"
+            )
+            return None
 
-            _user_callback_handlers[cache_key] = handler
+        if error_holder["error"]:
+            raise error_holder["error"]
+
+        handler = handler_holder["handler"]
+        if handler is None:
+            with _client_lock:
+                _callback_failure_timestamps[cache_key] = time.time()
+            return None
+
+        if use_cache:
+            with _client_lock:
+                existing = _user_callback_handlers.get(cache_key)
+                if existing:
+                    return existing
+                _user_callback_handlers[cache_key] = handler
             logger.debug(
                 f"Created and cached CallbackHandler for key: {cache_key[:8]}..."
             )
-            return handler
-        except Exception as e:
+
+        return handler
+    except Exception as e:
+        with _client_lock:
             _callback_failure_timestamps[cache_key] = time.time()
-            logger.error(f"Failed to create CallbackHandler: {e}", exc_info=True)
-            return None
+        logger.error(f"Failed to create CallbackHandler: {e}", exc_info=True)
+        return None
 
 
 def cleanup_user_client(public_key: str):
@@ -198,7 +219,7 @@ def prepare_trace_context(
     Returns:
         Dictionary with user_id, session_id, and metadata for propagate_attributes()
     """
-    context = {
+    context: Dict[str, Any] = {
         "user_id": str(user_id),
     }
 
@@ -206,7 +227,7 @@ def prepare_trace_context(
         context["session_id"] = str(session_id)
 
     if metadata:
-        metadata_payload: Dict[str, str] = {}
+        metadata_payload: Dict[str, Any] = {}
         for key, value in metadata.items():
             if value is None:
                 continue

@@ -1929,7 +1929,9 @@ async def ai_agent_workflow_events(
 
             if public_key and secret_key:
                 langfuse_callback = get_callback_handler_for_user(
-                    public_key, secret_key
+                    public_key,
+                    secret_key,
+                    trace_id=trace_id,
                 )
                 if langfuse_callback:
                     checkpoint_config["callbacks"].append(langfuse_callback)
