@@ -41,13 +41,14 @@ class ToolProposal(BaseModel):
 class RoutingDecision(BaseModel):
     """Supervisor routing decision (backward compatible format)."""
 
-    agent: Literal["greeter", "gmail", "config", "search", "process"]
+    agent: Literal["greeter", "gmail", "config", "search", "process", "scouting"]
     query: str
     require_clarification: bool = False
     # Optional fields for structured output
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
     clarification_question: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class ToolResult(BaseModel):

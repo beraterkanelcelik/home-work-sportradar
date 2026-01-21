@@ -12,7 +12,12 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.types import interrupt, Command
 from langgraph.errors import GraphInterrupt
 from langchain_core.messages import HumanMessage, ToolMessage
-from app.agents.functional.models import AgentRequest, AgentResponse, ToolProposal
+from app.agents.functional.models import (
+    AgentRequest,
+    AgentResponse,
+    ToolProposal,
+    RoutingDecision,
+)
 from app.agents.functional.streaming import EventCallbackHandler
 from app.agents.functional.tasks import (
     route_to_agent,
@@ -687,11 +692,30 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                 else:
                     query = request.query
 
-                routing = route_to_agent(
-                    messages=messages,
-                    config=checkpoint_config,
-                    api_key=api_key,
-                ).result()
+                resume_payload = None
+                routing_override = None
+                if (
+                    isinstance(request, Command)
+                    and hasattr(request, "resume")
+                    and isinstance(request.resume, dict)
+                ):
+                    resume_payload = request.resume
+                    if is_scouting_resume_payload(resume_payload):
+                        routing_override = "scouting"
+
+                if routing_override == "scouting":
+                    routing = RoutingDecision(
+                        agent="scouting",
+                        query=query,
+                        require_clarification=False,
+                        metadata=resume_payload or None,
+                    )
+                else:
+                    routing = route_to_agent(
+                        messages=messages,
+                        config=checkpoint_config,
+                        api_key=api_key,
+                    ).result()
 
                 logger.info(f"Supervisor routed to agent: {routing.agent}")
 
@@ -704,101 +728,126 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                         agent_name="supervisor",
                     )
 
-                # NEW: Check if planning is needed (only on initial run, not on resume)
-                if not isinstance(request, Command) and _should_generate_plan(
-                    query, routing.agent
-                ):
-                    logger.info(
-                        "[PLANNING] Heuristics suggest planning needed for query"
+                if routing.agent == "scouting":
+                    from app.agents.functional.scouting_workflow import scouting_workflow
+
+                    scouting_request = (
+                        request
+                        if isinstance(request, Command)
+                        else {
+                            "message": query,
+                            "user_id": current_user_id,
+                            "session_id": current_session_id,
+                            "api_key": api_key,
+                            "run_id": current_run_id,
+                        }
                     )
-
-                    # Import and invoke planning task
-                    from app.agents.functional.tasks.planner import analyze_and_plan
-
-                    plan_analysis = analyze_and_plan(
-                        messages=messages,
-                        user_id=current_user_id,
-                        config=checkpoint_config,
-                    ).result()
-
-                    # Check if plan was generated
-                    if plan_analysis.get("requires_plan") and plan_analysis.get("plan"):
-                        plan_steps = plan_analysis["plan"]
+                    response = scouting_workflow.invoke(
+                        scouting_request, config=checkpoint_config
+                    )
+                    logger.info(
+                        "[WORKFLOW] scouting workflow returned: "
+                        f"has_reply={bool(response.reply)}, "
+                        f"reply_preview={response.reply[:50] if response.reply else '(empty)'}..."
+                    )
+                else:
+                    # NEW: Check if planning is needed (only on initial run, not on resume)
+                    if not isinstance(request, Command) and _should_generate_plan(
+                        query, routing.agent
+                    ):
                         logger.info(
-                            f"[PLANNING] Generated plan with {len(plan_steps)} steps"
+                            "[PLANNING] Heuristics suggest planning needed for query"
                         )
 
-                        # Create plan proposal data
-                        plan_data = {
-                            "type": "plan_proposal",
-                            "plan": plan_steps,
-                            "plan_index": 0,
-                            "plan_total": len(plan_steps),
-                        }
+                        # Import and invoke planning task
+                        from app.agents.functional.tasks.planner import analyze_and_plan
 
-                        # Request plan approval via interrupt() - don't save to DB yet
-                        # Following tool approval pattern: send interrupt, frontend handles UI, save after approval
-                        approval = request_plan_approval(plan_data, current_session_id or 0)
+                        plan_analysis = analyze_and_plan(
+                            messages=messages,
+                            user_id=current_user_id,
+                            config=checkpoint_config,
+                        ).result()
 
-                        if not approval.get("approved"):
-                            # Plan rejected
-                            logger.info("[PLANNING] Plan rejected by user")
-                            return AgentResponse(
-                                type="answer",
-                                reply="Plan rejected. Please provide a new query or clarify your request.",
-                                agent_name="planner",
+                        # Check if plan was generated
+                        if plan_analysis.get("requires_plan") and plan_analysis.get("plan"):
+                            plan_steps = plan_analysis["plan"]
+                            logger.info(
+                                f"[PLANNING] Generated plan with {len(plan_steps)} steps"
                             )
 
-                        # Plan approved - execute it
-                        logger.info(
-                            f"[PLANNING] Plan approved, executing {len(plan_steps)} steps"
-                        )
-                        return _execute_plan_workflow(
-                            AgentRequest(
-                                query=query,
-                                session_id=current_session_id,
-                                user_id=current_user_id,
-                                plan_steps=plan_steps,
-                                flow="plan",
-                                trace_id=trace_id_for_langfuse,
-                                run_id=current_run_id,
-                                parent_message_id=current_parent_message_id,
-                                openai_api_key=api_key,
-                                langfuse_public_key=langfuse_public_key,
-                                langfuse_secret_key=langfuse_secret_key,
-                            ),
-                            checkpoint_config,
-                            checkpointer,
-                            thread_id,
-                        )
-                    else:
-                        logger.info(
-                            f"[PLANNING] No plan needed: {plan_analysis.get('reasoning', 'Unknown reason')}"
-                        )
-                        # Continue with normal agent execution below
+                            # Create plan proposal data
+                            plan_data = {
+                                "type": "plan_proposal",
+                                "plan": plan_steps,
+                                "plan_index": 0,
+                                "plan_total": len(plan_steps),
+                            }
 
-                # Normal flow: invoke agent
-                # When resuming from interrupt, LangGraph will restore checkpointed state
-                # and interrupt() will return the resume payload (approval decisions)
-                # Use generic agent task (no hardcoded routing)
-                logger.info(
-                    f"[WORKFLOW] Routing to {routing.agent} agent for query_preview="
-                    f"{routing.query[:50] if routing.query else '(empty)'}..."
-                )
+                            # Request plan approval via interrupt() - don't save to DB yet
+                            # Following tool approval pattern: send interrupt, frontend handles UI, save after approval
+                            approval = request_plan_approval(
+                                plan_data, current_session_id or 0
+                            )
 
-                response = execute_agent(
-                    agent_name=routing.agent,
-                    messages=messages,
-                    user_id=current_user_id,
-                    model_name=None,
-                    config=checkpoint_config,
-                    api_key=api_key,
-                ).result()
-                logger.info(
-                    f"[WORKFLOW] {routing.agent} agent returned: has_reply={bool(response.reply)}, "
-                    f"reply_preview={response.reply[:50] if response.reply else '(empty)'}..., "
-                    f"tool_calls_count={len(response.tool_calls) if response.tool_calls else 0}"
-                )
+                            if not approval.get("approved"):
+                                # Plan rejected
+                                logger.info("[PLANNING] Plan rejected by user")
+                                return AgentResponse(
+                                    type="answer",
+                                    reply="Plan rejected. Please provide a new query or clarify your request.",
+                                    agent_name="planner",
+                                )
+
+                            # Plan approved - execute it
+                            logger.info(
+                                f"[PLANNING] Plan approved, executing {len(plan_steps)} steps"
+                            )
+                            return _execute_plan_workflow(
+                                AgentRequest(
+                                    query=query,
+                                    session_id=current_session_id,
+                                    user_id=current_user_id,
+                                    plan_steps=plan_steps,
+                                    flow="plan",
+                                    trace_id=trace_id_for_langfuse,
+                                    run_id=current_run_id,
+                                    parent_message_id=current_parent_message_id,
+                                    openai_api_key=api_key,
+                                    langfuse_public_key=langfuse_public_key,
+                                    langfuse_secret_key=langfuse_secret_key,
+                                ),
+                                checkpoint_config,
+                                checkpointer,
+                                thread_id,
+                            )
+                        else:
+                            logger.info(
+                                f"[PLANNING] No plan needed: {plan_analysis.get('reasoning', 'Unknown reason')}"
+                            )
+                            # Continue with normal agent execution below
+
+                    # Normal flow: invoke agent
+                    # When resuming from interrupt, LangGraph will restore checkpointed state
+                    # and interrupt() will return the resume payload (approval decisions)
+                    # Use generic agent task (no hardcoded routing)
+                    logger.info(
+                        f"[WORKFLOW] Routing to {routing.agent} agent for query_preview="
+                        f"{routing.query[:50] if routing.query else '(empty)'}..."
+                    )
+
+                    response = execute_agent(
+                        agent_name=routing.agent,
+                        messages=messages,
+                        user_id=current_user_id,
+                        model_name=None,
+                        config=checkpoint_config,
+                        api_key=api_key,
+                    ).result()
+                    logger.info(
+                        f"[WORKFLOW] {routing.agent} agent returned: has_reply={bool(response.reply)}, "
+                        f"reply_preview={response.reply[:50] if response.reply else '(empty)'}..., "
+                        f"tool_calls_count={len(response.tool_calls) if response.tool_calls else 0}"
+                    )
             else:
                 # Resume with pending tool_calls - reconstruct response from stored tool_calls
                 # Get routing agent from last assistant message or response metadata
@@ -1436,7 +1485,11 @@ def extract_interrupt_value(interrupt_raw: Any) -> Dict[str, Any]:
     if isinstance(interrupt_raw, dict):
         if "value" in interrupt_raw:
             return interrupt_raw["value"]
-        if interrupt_raw.get("type") in ("tool_approval", "plan_approval"):
+        if interrupt_raw.get("type") in (
+            "tool_approval",
+            "plan_approval",
+            "player_approval",
+        ):
             return interrupt_raw
 
     # Handle list format (serialized tuple)
@@ -1445,7 +1498,11 @@ def extract_interrupt_value(interrupt_raw: Any) -> Dict[str, Any]:
         if isinstance(first_item, dict):
             if "value" in first_item:
                 return first_item["value"]
-            if first_item.get("type") in ("tool_approval", "plan_approval"):
+            if first_item.get("type") in (
+                "tool_approval",
+                "plan_approval",
+                "player_approval",
+            ):
                 return first_item
 
     # Fallback: return raw data if we couldn't extract value
@@ -1467,6 +1524,21 @@ def get_event_queue_from_config(config: Dict[str, Any]):
         Event queue if available, None otherwise
     """
     return config.get("_event_queue")
+
+
+def is_scouting_resume_payload(payload: Dict[str, Any]) -> bool:
+    """Check whether a resume payload belongs to the scouting workflow."""
+    if not payload:
+        return False
+
+    payload_type = payload.get("type")
+    if payload_type == "player_approval":
+        return True
+
+    if payload_type == "plan_approval":
+        return any(key in payload for key in ("player_name", "plan_steps", "query_hints"))
+
+    return False
 
 
 def partition_tools(
@@ -1869,6 +1941,16 @@ async def ai_agent_workflow_events(
         "load_messages_task": "Loading conversation history...",
         "check_summarization_needed_task": "Checking if summarization needed...",
         "save_message_task": "Saving message...",
+        # Scouting workflow tasks
+        "intake_and_route_scouting": "Analyzing scouting request...",
+        "draft_plan": "Drafting scouting plan...",
+        "build_queries": "Building scouting queries...",
+        "retrieve_evidence": "Retrieving scouting evidence...",
+        "extract_fields": "Extracting player fields...",
+        "compose_report": "Composing scouting report...",
+        "prepare_preview": "Preparing player preview...",
+        "write_player_item": "Saving player record...",
+        "build_final_response": "Finalizing scouting response...",
         # Planning-related tasks
         "analyze_and_plan": "Analyzing task and generating plan...",
         "_execute_plan_workflow": "Executing plan...",

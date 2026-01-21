@@ -60,6 +60,10 @@ def route_to_agent(
             agent=decision.agent,
             query=query,
             require_clarification=decision.requires_clarification,
+            confidence=decision.confidence,
+            reasoning=decision.reasoning,
+            clarification_question=decision.clarification_question,
+            metadata=decision.metadata,
         )
     except Exception as e:
         logger.error(f"Error in route_to_agent: {e}", exc_info=True)

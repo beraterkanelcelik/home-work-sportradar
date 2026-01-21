@@ -32,7 +32,14 @@ class EventCallbackHandler(BaseCallbackHandler):
         self.supervisor_in_stack = False
         self.is_planner_llm = False
         self.planner_in_stack = False
-        self.agent_names = {"greeter", "search", "gmail", "config", "process"}
+        self.agent_names = {
+            "greeter",
+            "search",
+            "gmail",
+            "config",
+            "process",
+            "scouting",
+        }
         self.active_tasks = {}
     
     def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs) -> None:

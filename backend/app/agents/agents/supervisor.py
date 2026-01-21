@@ -2,7 +2,8 @@
 Supervisor agent for routing messages to appropriate sub-agents.
 """
 
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
+import re
 from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage, AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -15,7 +16,14 @@ logger = get_logger(__name__)
 class RoutingDecisionModel(BaseModel):
     """Structured routing decision from supervisor."""
 
-    agent: Literal["greeter", "search", "gmail", "config", "process"] = Field(
+    agent: Literal[
+        "greeter",
+        "search",
+        "gmail",
+        "config",
+        "process",
+        "scouting",
+    ] = Field(
         description="The agent to route this query to"
     )
     confidence: float = Field(
@@ -27,6 +35,9 @@ class RoutingDecisionModel(BaseModel):
     )
     clarification_question: Optional[str] = Field(
         default=None, description="Question to ask user if clarification needed"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Optional routing metadata"
     )
 
 
@@ -40,6 +51,7 @@ class SupervisorAgent(BaseAgent):
         "greeter": "Provides welcome messages and guidance. Use when user needs help or is starting.",
         "search": "Searches through user's uploaded documents and answers questions using RAG. Use when user asks about their documents, wants to search for information, or asks questions that might be in their uploaded files.",
         "gmail": "Handles email-related tasks. Use when user asks about emails, messages, or mail.",
+        "scouting": "Generates structured scouting reports for sports players using uploaded documents. Use for scouting report requests, player analysis, strengths/weaknesses evaluations, or player profile creation.",
     }
 
     def __init__(
@@ -87,6 +99,7 @@ Consider:
 - Questions about people, entities, facts, or information that might be in documents (→ search)
 - "Who is X?", "What is X?", "Tell me about X" type questions (→ search)
 - Whether it's email-related (→ gmail)
+- Scouting report requests, player analysis, or strengths/weaknesses evaluations (→ scouting)
 - If unclear, route to greeter for guidance
 
 IMPORTANT: Questions asking about specific people, entities, or facts (e.g., "who is X?", "what is X?", "tell me about X") should be routed to the search agent, as they likely need to search through uploaded documents.
@@ -115,6 +128,7 @@ Provide your routing decision with confidence score and reasoning."""
             from langchain_core.messages import HumanMessage
 
             latest_message = None
+            latest_message_raw = None
             if messages:
                 for msg in reversed(messages):
                     if (
@@ -122,8 +136,37 @@ Provide your routing decision with confidence score and reasoning."""
                         and hasattr(msg, "content")
                         and msg.content
                     ):
-                        latest_message = msg.content.lower().strip()
+                        latest_message_raw = str(msg.content).strip()
+                        latest_message = latest_message_raw.lower()
                         break
+
+            # Explicit keyword-based routing for scouting requests
+            if latest_message:
+                scouting_keywords = [
+                    "scouting report",
+                    "scout",
+                    "player profile",
+                    "player analysis",
+                    "analyze player",
+                    "player strengths",
+                    "player weaknesses",
+                    "strengths and weaknesses",
+                    "scouting on",
+                ]
+                if any(keyword in latest_message for keyword in scouting_keywords):
+                    metadata = self._build_scouting_metadata(
+                        latest_message_raw or latest_message
+                    )
+                    logger.info(
+                        f"Keyword-based routing: routing '{latest_message[:50]}...' to scouting agent"
+                    )
+                    return RoutingDecisionModel(
+                        agent="scouting",
+                        confidence=1.0,
+                        reasoning="Matched scouting keyword pattern",
+                        requires_clarification=False,
+                        metadata=metadata or None,
+                    )
 
             # Explicit keyword-based routing for common search queries
             if latest_message:
@@ -209,6 +252,11 @@ Provide your routing decision with confidence score and reasoning."""
                     requires_clarification=False,
                 )
 
+            if decision.agent == "scouting" and not decision.metadata:
+                decision.metadata = self._build_scouting_metadata(
+                    latest_message_raw or latest_message or ""
+                )
+
             # Auto-clarification for low confidence
             if decision.confidence < 0.7 and not decision.requires_clarification:
                 decision.requires_clarification = True
@@ -235,6 +283,45 @@ Provide your routing decision with confidence score and reasoning."""
                 requires_clarification=True,
                 clarification_question="I'm not sure I understood. Could you rephrase your request?",
             )
+
+    def _build_scouting_metadata(self, message: str) -> Dict[str, Any]:
+        """Extract scouting metadata from a message."""
+        player_name = self._extract_player_name(message)
+        sport_guess = self._guess_sport(message)
+
+        metadata: Dict[str, Any] = {"sport_guess": sport_guess}
+        if player_name:
+            metadata["player_name"] = player_name
+        return metadata
+
+    def _extract_player_name(self, message: str) -> Optional[str]:
+        """Best-effort extraction of player name from a scouting query."""
+        patterns = [
+            r"scouting report for\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+            r"scout\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+            r"player profile for\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+            r"player analysis of\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+            r"analyze\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+            r"report for\s+([A-Za-z.'\-]+(?:\s+[A-Za-z.'\-]+){0,3})",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                name = name.rstrip(".,;:!?")
+                if name:
+                    return name
+        return None
+
+    def _guess_sport(self, message: str) -> str:
+        """Guess sport from message keywords."""
+        message_lower = message.lower()
+        if "nba" in message_lower or "basketball" in message_lower:
+            return "nba"
+        if "nfl" in message_lower or "football" in message_lower:
+            return "football"
+        return "unknown"
 
     def get_tools(self) -> List:
         """Supervisor doesn't need tools."""
