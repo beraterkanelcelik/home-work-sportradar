@@ -39,7 +39,6 @@ import { toast } from 'sonner'
 import { createAgentStream, StreamEvent } from '@/lib/streaming'
 import { chatAPI, agentAPI, documentAPI, modelsAPI } from '@/lib/api'
 import { getErrorMessage } from '@/lib/utils'
-import type { PlanProposalData } from '@/components/PlanProposal'
 import { generateTempMessageId, generateTempStatusMessageId } from '@/constants/messages'
 
 // Import extracted components
@@ -51,6 +50,7 @@ import StatsDialog from '@/components/chat/StatsDialog'
 import DeleteDialogs from '@/components/chat/DeleteDialogs'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { usePlanApproval } from '@/hooks/usePlanApproval'
+import { usePlayerApproval } from '@/hooks/usePlayerApproval'
 
 
 export default function ChatPage() {
@@ -600,7 +600,40 @@ export default function ChatPage() {
                   updates.response_type = 'plan_proposal'
                   updates.plan = updateData.plan
                 }
-                
+
+                if (updateData.type === 'coverage_report' && updateData.coverage) {
+                  updates.response_type = 'coverage_report'
+                  updates.coverage_report = updateData.coverage
+                }
+
+                // Handle plan step progress updates (for scouting workflow real-time progress)
+                if (updateData.type === 'plan_step_progress') {
+                  console.log(`[FRONTEND] [PLAN_PROGRESS] Step ${updateData.step_index + 1}/${updateData.total_steps}: ${updateData.status} - ${updateData.step_name}`)
+                  
+                  // Update the plan with step progress
+                  if (!updates.plan_progress) {
+                    updates.plan_progress = {}
+                  }
+                  updates.plan_progress = {
+                    ...updates.plan_progress,
+                    current_step_index: updateData.step_index,
+                    total_steps: updateData.total_steps,
+                    steps_status: {
+                      ...(updates.plan_progress?.steps_status || {}),
+                      [updateData.step_index]: {
+                        status: updateData.status,
+                        step_name: updateData.step_name,
+                        result: updateData.result,
+                      }
+                    }
+                  }
+                }
+
+                if (updateData.type === 'player_preview' && updateData.player_preview) {
+                  updates.response_type = 'player_preview'
+                  updates.player_preview = updateData.player_preview
+                }
+
                 if (updateData.clarification) {
                   updates.clarification = updateData.clarification
                 }
@@ -682,6 +715,48 @@ export default function ChatPage() {
                   })
                 }
               })
+            } else if (eventType === 'plan_step_progress') {
+              // Handle plan step progress events from scouting workflow
+              const progressData = event.data || {}
+              console.log(`[FRONTEND] [PLAN_PROGRESS] Step ${progressData.step_index + 1}/${progressData.total_steps}: ${progressData.status} - ${progressData.step_name}`)
+              
+              set((state: { messages: Message[] }) => {
+                const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+                if (!currentMessage) {
+                  return state
+                }
+                
+                const currentProgress = currentMessage.plan_progress || {
+                  current_step_index: -1,
+                  total_steps: progressData.total_steps || 0,
+                  steps_status: {}
+                }
+                
+                const updatedProgress = {
+                  ...currentProgress,
+                  current_step_index: progressData.status === 'in_progress' ? progressData.step_index : currentProgress.current_step_index,
+                  total_steps: progressData.total_steps || currentProgress.total_steps,
+                  steps_status: {
+                    ...currentProgress.steps_status,
+                    [progressData.step_index]: {
+                      status: progressData.status,
+                      step_name: progressData.step_name,
+                      result: progressData.result,
+                    }
+                  }
+                }
+                
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? {
+                          ...msg,
+                          plan_progress: updatedProgress
+                        }
+                      : msg
+                  ),
+                }
+              })
             } else if (eventType === 'error') {
               const errorData = event.data || {}
               const duration = Date.now() - streamStartTime
@@ -726,7 +801,7 @@ export default function ChatPage() {
                   if (interruptData.value) {
                     interruptValue = interruptData.value
                     console.log(`[HITL] [DEBUG] Extracted from interruptData.value:`, interruptValue)
-                  } else if (interruptData.type === 'tool_approval' || interruptData.type === 'plan_approval') {
+                  } else if (interruptData.type === 'tool_approval' || interruptData.type === 'plan_approval' || interruptData.type === 'player_approval') {
                     interruptValue = interruptData
                     console.log(`[HITL] [DEBUG] Using interruptData directly (type=${interruptData.type}):`, interruptValue)
                   }
@@ -736,9 +811,32 @@ export default function ChatPage() {
               console.log(`[HITL] [DEBUG] Final interruptValue:`, interruptValue)
               
               if (interruptValue && interruptValue.type === 'plan_approval') {
-                // Plan approval interrupt - follows same pattern as tool approval
-                // Backend sends: { type: "plan_approval", plan: { type: "plan_proposal", plan: [...], plan_index: 0, plan_total: X } }
-                const planData = interruptValue.plan
+                // Plan approval interrupt - handle both general planner and scouting formats:
+                // 1. General planner: { type: "plan_approval", plan: { type: "plan_proposal", plan: [...], plan_index: 0, plan_total: X } }
+                // 2. Scouting: { type: "plan_approval", player_name: "...", sport_guess: "...", plan_steps: [...], query_hints: [...] }
+                let planData = interruptValue.plan
+
+                // Handle scouting workflow format - convert to common format
+                if (!planData && interruptValue.plan_steps) {
+                  planData = {
+                    type: 'plan_proposal',
+                    plan: interruptValue.plan_steps.map((step: string, index: number) => ({
+                      // Match PlanStep interface expected by PlanProposal.tsx
+                      action: 'tool',  // Mark as tool action so it shows the description
+                      tool: `Step ${index + 1}`,  // Tool name displayed as step number
+                      agent: 'scouting',
+                      query: step,  // The step description goes in query field
+                    })),
+                    plan_index: 0,
+                    plan_total: interruptValue.plan_steps.length,
+                    // Include scouting-specific metadata
+                    player_name: interruptValue.player_name,
+                    sport_guess: interruptValue.sport_guess,
+                    query_hints: interruptValue.query_hints,
+                    session_id: interruptValue.session_id
+                  }
+                  console.log(`[HITL] [PLAN_APPROVAL] Converted scouting plan format:`, planData)
+                }
 
                 console.log(`[HITL] [PLAN_APPROVAL] Received plan approval interrupt:`, planData)
 
@@ -878,20 +976,72 @@ export default function ChatPage() {
                     ),
                   }
                 })
-              } else {
-                console.warn(`[HITL] [INTERRUPT] Could not parse interrupt data:`, interruptData)
-              }
-              
+              } else if (interruptValue && interruptValue.type === 'player_approval') {
+                // Player approval interrupt - HITL Gate B for scouting workflow
+                // Backend sends: { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
+                
+                // Convert backend format to frontend expected format
+                const playerPreview = {
+                  player: interruptValue.player_fields,
+                  report_summary: interruptValue.report_summary,
+                  report_text: interruptValue.report_text,
+                  session_id: interruptValue.session_id
+                }
+
+                console.log(`[PLAYER_HITL] [INTERRUPT] Received player approval interrupt: session=${currentSession?.id} player=${playerPreview?.player?.display_name}`, playerPreview)
+
+                // Mark message as ready to show player preview
+                setStreamComplete(prev => new Set(prev).add(assistantMessageId))
+
+                // Update/create assistant message with player preview data
+                set((state: { messages: Message[] }) => {
+                  let currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+
+                  // Create assistant message if it doesn't exist
+                  if (!currentMessage) {
+                    console.log(`[PLAYER_HITL] [INTERRUPT] Creating assistant message for player preview: session=${currentSession.id}`)
+                    const newMessage: Message = {
+                      id: assistantMessageId,
+                      role: 'assistant',
+                      content: '',
+                      tokens_used: 0,
+                      created_at: new Date().toISOString(),
+                      metadata: {
+                        agent_name: 'scouting'
+                      },
+                      response_type: 'player_preview',
+                      player_preview: playerPreview
+                    }
+                    return {
+                      messages: [...state.messages, newMessage]
+                    }
+                  }
+
+                  // Update existing message with player preview data
+                  return {
+                    messages: state.messages.map((msg: Message) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            response_type: 'player_preview',
+                            player_preview: playerPreview
+                          }
+                        : msg
+                    )
+                  }
+                })
+
               // Don't set sending=false here - we're waiting for resume
               // Connection stays open to receive final response after resume
-            } else if (eventType === 'heartbeat') {
-              // Heartbeat event to keep connection alive (scalability best practice)
-              // Prevents idle connection timeouts
-              // Log periodically to track connection health
-              const elapsed = Date.now() - streamStartTime
-              if (elapsed % 60000 < 1000) { // Log roughly every minute
-                console.log(`[FRONTEND] [HEARTBEAT] Connection alive session=${currentSession.id} elapsed=${Math.floor(elapsed / 1000)}s`)
-              }
+            }
+          } else if (eventType === 'heartbeat') {
+                // Heartbeat event to keep connection alive (scalability best practice)
+                // Prevents idle connection timeouts
+                // Log periodically to track connection health
+                const elapsed = Date.now() - streamStartTime
+                if (elapsed % 60000 < 1000) { // Log roughly every minute
+                  console.log(`[FRONTEND] [HEARTBEAT] Connection alive session=${currentSession.id} elapsed=${Math.floor(elapsed / 1000)}s`)
+                }
             } else if (eventType === 'final') {
               // Final event contains the complete response after approval
               const finalData = event.data || event.response || {}
@@ -1178,168 +1328,43 @@ export default function ChatPage() {
     }
   }
 
+  // ============================================================================
+  // CUSTOM HOOKS
+  // ============================================================================
+  // Tool Approval Hook
+  // Location: frontend/src/hooks/useToolApproval.ts
+  // Handles tool approval logic for human-in-the-loop workflows
+  const { handleApproveTool, handleRejectTool, approvingToolCalls, setApprovingToolCalls } = useToolApproval({
+    currentSession,
+    updateMessages: (updater) => {
+      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
+    },
+    loadMessages,
+  })
+  
+  const { handleApprovePlan, handleRejectPlan, approvingPlans } = usePlanApproval({
+    currentSession,
+    updateMessages: (updater) => {
+      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
+    },
+    setExecutingPlanMessageId,
+  })
+  
+  const {
+    handleApprovePlayer,
+    handleRejectPlayer,
+    handleEditWording,
+    handleEditContent,
+    approvingPlayers,
+  } = usePlayerApproval({
+    currentSession,
+    updateMessages: (updater) => {
+      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
+    },
+    loadMessages,
+  })
 
-  // Handle plan approval
-  const handlePlanApproval = useCallback(async (messageId: number, plan: PlanProposalData) => {
-    if (!currentSession || sending) return
-
-    setExecutingPlanMessageId(messageId)
-    setSending(true)
-
-    try {
-      const token = localStorage.getItem('access_token')
-      if (!token) {
-        throw new Error('No authentication token')
-      }
-
-      // Extract plan steps from proposal
-      const planSteps = plan.plan.map((step) => ({
-        action: step.action,
-        tool: step.tool,
-        props: step.props,
-        agent: step.agent,
-        query: step.query,
-      }))
-
-      {
-        // Create streaming message for plan execution
-        const executionMessageId = Date.now() + 1
-        setWaitingForResponse(true)
-        setWaitingMessageId(executionMessageId)
-        set((state: { messages: Message[] }) => ({
-          messages: [
-            ...state.messages,
-            {
-              id: executionMessageId,
-              role: 'assistant' as const,
-              content: '',
-              tokens_used: 0,
-              created_at: new Date().toISOString(),
-              metadata: { agent_name: plan.plan[0]?.agent || 'greeter' },
-              response_type: 'answer',
-            },
-          ],
-        }))
-
-        // Stream plan execution
-        const stream = createAgentStream(
-          currentSession.id,
-          '', // Empty message for plan execution
-          token,
-          (event: StreamEvent) => {
-            if (event.type === 'token') {
-              setWaitingForResponse(false)
-              setWaitingMessageId(null)
-              set((state: { messages: Message[] }) => {
-                const currentMessage = state.messages.find((msg: Message) => msg.id === executionMessageId)
-                const currentContent = currentMessage?.content || ''
-                const tokenData = event.data || ''
-                const newContent = currentContent + tokenData
-                
-                return {
-                  messages: state.messages.map((msg: Message) =>
-                    msg.id === executionMessageId
-                      ? { ...msg, content: newContent }
-                      : msg
-                  ),
-                }
-              })
-            } else if (event.type === 'update') {
-              const updateData = event.data || {}
-              set((state: { messages: Message[] }) => {
-                const currentMessage = state.messages.find((msg: Message) => msg.id === executionMessageId)
-                if (!currentMessage) return state
-
-                // Handle plan progress updates
-                let updatedPlan = currentMessage.plan
-                if (updateData.plan_index !== undefined && currentMessage.plan) {
-                  updatedPlan = {
-                    ...currentMessage.plan,
-                    plan_index: updateData.plan_index,
-                  }
-                }
-
-                const updatedMetadata = {
-                  ...currentMessage.metadata,
-                  ...(updateData.agent_name && { agent_name: updateData.agent_name }),
-                  ...(updateData.tool_calls && { tool_calls: updateData.tool_calls }),
-                }
-
-                // Add status message for plan progress
-                let updatedStatus = currentMessage.status
-                if (updateData.plan_index !== undefined && updateData.plan_total !== undefined) {
-                  updatedStatus = `Executing plan step ${updateData.plan_index + 1} of ${updateData.plan_total}...`
-                }
-
-                return {
-                  messages: state.messages.map((msg: Message) =>
-                    msg.id === executionMessageId
-                      ? {
-                          ...msg,
-                          metadata: updatedMetadata,
-                          ...(updatedPlan && { plan: updatedPlan }),
-                          ...(updatedStatus && { status: updatedStatus }),
-                        }
-                      : msg
-                  ),
-                }
-              })
-            } else if (event.type === 'done') {
-              const doneData = event.data || {}
-              set((state: { messages: Message[] }) => {
-                return {
-                  messages: state.messages.map((msg: Message) =>
-                    msg.id === executionMessageId
-                      ? {
-                          ...msg,
-                          ...(doneData.tokens_used && { tokens_used: doneData.tokens_used }),
-                          ...(doneData.context_usage && { context_usage: doneData.context_usage }),
-                          // Extract agent_name from done event (backend sends "agent" key)
-                          ...(doneData.agent && {
-                            metadata: {
-                              ...msg.metadata,
-                              agent_name: doneData.agent,
-                            },
-                          }),
-                        }
-                      : msg
-                  ),
-                }
-              })
-            } else if (event.type === 'error') {
-              toast.error(event.data?.error || 'Plan execution error')
-              setSending(false)
-              setWaitingForResponse(false)
-              setWaitingMessageId(null)
-            }
-          },
-          (error: Error) => {
-            toast.error(error.message || 'Plan execution connection error')
-            setSending(false)
-            setWaitingForResponse(false)
-            setWaitingMessageId(null)
-          },
-          () => {
-            loadMessages(currentSession.id)
-            setSending(false)
-            setWaitingForResponse(false)
-            setWaitingMessageId(null)
-            setExecutingPlanMessageId(null)
-          },
-          planSteps,
-          'plan'
-        )
-
-        streamRef.current = stream
-      }
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, 'Failed to execute plan'))
-      setSending(false)
-      setExecutingPlanMessageId(null)
-    }
-  }, [currentSession, sending, loadMessages])
-
-  // Handle plan rejection
+  // Handle plan rejection (legacy - kept for backward compatibility)
   const handlePlanRejection = useCallback((messageId: number) => {
     // Update message to show rejection
     set((state: { messages: Message[] }) => ({
@@ -1355,28 +1380,6 @@ export default function ChatPage() {
     }))
     toast.info('Plan rejected')
   }, [])
-
-  // ============================================================================
-  // CUSTOM HOOKS
-  // ============================================================================
-  // Tool Approval Hook
-  // Location: frontend/src/hooks/useToolApproval.ts
-  // Handles tool approval logic for human-in-the-loop workflows
-  const { handleApproveTool, handleRejectTool, approvingToolCalls, setApprovingToolCalls } = useToolApproval({
-    currentSession,
-    updateMessages: (updater) => {
-      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
-    },
-    loadMessages,
-  })
-
-  const { handleApprovePlan, handleRejectPlan, approvingPlans } = usePlanApproval({
-    currentSession,
-    updateMessages: (updater) => {
-      set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
-    },
-    setExecutingPlanMessageId,
-  })
 
   // ============================================================================
   // RENDER
@@ -1493,6 +1496,11 @@ export default function ChatPage() {
                   onPlanApproval={handleApprovePlan}
                   onPlanRejection={handleRejectPlan}
                   executingPlanMessageId={executingPlanMessageId}
+                  onApprovePlayer={handleApprovePlayer}
+                  onRejectPlayer={handleRejectPlayer}
+                  onEditPlayerWording={handleEditWording}
+                  onEditPlayerContent={handleEditContent}
+                  approvingPlayers={approvingPlayers}
                   userEmail={user?.email}
                 />
               )}

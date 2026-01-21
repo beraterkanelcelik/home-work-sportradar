@@ -73,3 +73,4 @@ class AgentResponse(BaseModel):
     plan: Optional[Dict[str, Any]] = None
     raw_tool_outputs: Optional[List[Dict[str, Any]]] = None
     context_usage: Optional[Dict[str, Any]] = None  # NEW: Token context usage tracking
+    interrupt_data: Optional[Dict[str, Any]] = None  # HITL interrupt payload

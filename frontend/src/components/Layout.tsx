@@ -36,28 +36,31 @@ export default function Layout() {
           {/* Desktop Navigation */}
           <div className="hidden lg:flex gap-4 items-center">
             <ServiceStatus />
-            {isAuthenticated ? (
-              <>
-                <Link to="/dashboard">
-                  <Button variant="ghost">Dashboard</Button>
-                </Link>
-                <Link to="/chat">
-                  <Button variant="ghost">Chats</Button>
-                </Link>
-                <Link to="/documents">
-                  <Button variant="ghost">Documents</Button>
-                </Link>
-                <Link to="/profile">
-                  <Button variant="ghost">Profile</Button>
-                </Link>
-                <span className="text-sm text-muted-foreground">
-                  {user?.email}
-                </span>
-                <Button variant="outline" onClick={handleLogout}>
-                  Logout
-                </Button>
-              </>
-            ) : (
+              {isAuthenticated ? (
+               <>
+                 <Link to="/dashboard">
+                   <Button variant="ghost">Dashboard</Button>
+                 </Link>
+                 <Link to="/chat">
+                   <Button variant="ghost">Chats</Button>
+                 </Link>
+                 <Link to="/documents">
+                   <Button variant="ghost">Documents</Button>
+                 </Link>
+                 <Link to="/scout-reports">
+                   <Button variant="ghost">Scout Reports</Button>
+                 </Link>
+                 <Link to="/profile">
+                   <Button variant="ghost">Profile</Button>
+                 </Link>
+                 <span className="text-sm text-muted-foreground">
+                   {user?.email}
+                 </span>
+                 <Button variant="outline" onClick={handleLogout}>
+                   Logout
+                 </Button>
+               </>
+             ) : (
               <>
                 <Link to="/login">
                   <Button variant="ghost">Login</Button>
@@ -99,18 +102,21 @@ export default function Layout() {
               <div className="container mx-auto px-4 py-4 space-y-3">
                 {isAuthenticated ? (
                   <>
-                    <Link to="/dashboard" onClick={closeMobileMenu}>
-                      <Button variant="ghost" className="w-full justify-start">Dashboard</Button>
-                    </Link>
-                    <Link to="/chat" onClick={closeMobileMenu}>
-                      <Button variant="ghost" className="w-full justify-start">Chats</Button>
-                    </Link>
-                    <Link to="/documents" onClick={closeMobileMenu}>
-                      <Button variant="ghost" className="w-full justify-start">Documents</Button>
-                    </Link>
-                    <Link to="/profile" onClick={closeMobileMenu}>
-                      <Button variant="ghost" className="w-full justify-start">Profile</Button>
-                    </Link>
+                     <Link to="/dashboard" onClick={closeMobileMenu}>
+                       <Button variant="ghost" className="w-full justify-start">Dashboard</Button>
+                     </Link>
+                     <Link to="/chat" onClick={closeMobileMenu}>
+                       <Button variant="ghost" className="w-full justify-start">Chats</Button>
+                     </Link>
+                     <Link to="/documents" onClick={closeMobileMenu}>
+                       <Button variant="ghost" className="w-full justify-start">Documents</Button>
+                     </Link>
+                     <Link to="/scout-reports" onClick={closeMobileMenu}>
+                       <Button variant="ghost" className="w-full justify-start">Scout Reports</Button>
+                     </Link>
+                     <Link to="/profile" onClick={closeMobileMenu}>
+                       <Button variant="ghost" className="w-full justify-start">Profile</Button>
+                     </Link>
                     <div className="pt-2 border-t">
                       <div className="px-3 py-2 text-sm text-muted-foreground">
                         {user?.email}

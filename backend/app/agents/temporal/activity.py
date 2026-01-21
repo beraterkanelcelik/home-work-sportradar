@@ -52,11 +52,96 @@ class ChatActivityOutput(BaseModel):
     has_response: bool = False
 
 
+class PublishTaskTracker:
+    """
+    Tracks async publish tasks for proper cleanup before activity returns.
+
+    This prevents CancelledError exceptions when the activity completes while
+    publish tasks are still in-flight. Without tracking, orphaned tasks get
+    cancelled when the event loop shuts down.
+    """
+
+    def __init__(self, semaphore: asyncio.Semaphore):
+        self._tasks: set[asyncio.Task] = set()
+        self._semaphore = semaphore
+
+    def create_task(self, coro, event_type: str, event_count: int) -> asyncio.Task:
+        """Create and track a publish task."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+
+        # Add done callback for cleanup and semaphore release
+        task.add_done_callback(lambda t: self._on_task_done(t, event_type, event_count))
+        return task
+
+    def _on_task_done(
+        self, task: asyncio.Task, event_type: str, event_count: int
+    ) -> None:
+        """Handle task completion: remove from tracking, release semaphore, log errors."""
+        # Remove from tracking set
+        self._tasks.discard(task)
+
+        # Log any errors (but not cancellation - that's expected during cleanup)
+        try:
+            if not task.cancelled() and task.exception():
+                logger.error(
+                    f"[REDIS_PUBLISH] Publish task failed for {event_type} (event_count={event_count}): {task.exception()}"
+                )
+        except Exception:
+            pass  # Ignore errors in callback
+        finally:
+            # Always release semaphore
+            try:
+                self._semaphore.release()
+            except Exception:
+                pass
+
+    async def wait_for_pending(self, timeout: float = 5.0) -> None:
+        """
+        Wait for all pending publish tasks to complete with timeout.
+
+        Args:
+            timeout: Maximum seconds to wait for tasks to complete
+        """
+        if not self._tasks:
+            return
+
+        pending_count = len(self._tasks)
+        logger.debug(
+            f"[REDIS_PUBLISH] Waiting for {pending_count} pending publish tasks (timeout={timeout}s)"
+        )
+
+        try:
+            # Copy set since it may be modified during iteration
+            pending = list(self._tasks)
+            if pending:
+                done, not_done = await asyncio.wait(
+                    pending, timeout=timeout, return_when=asyncio.ALL_COMPLETED
+                )
+
+                if not_done:
+                    logger.warning(
+                        f"[REDIS_PUBLISH] {len(not_done)} publish tasks did not complete within {timeout}s, cancelling"
+                    )
+                    for task in not_done:
+                        task.cancel()
+                    # Wait briefly for cancellation to propagate
+                    await asyncio.gather(*not_done, return_exceptions=True)
+                else:
+                    logger.debug(
+                        f"[REDIS_PUBLISH] All {len(done)} pending publish tasks completed"
+                    )
+        except Exception as e:
+            logger.warning(f"[REDIS_PUBLISH] Error waiting for pending tasks: {e}")
+
+
 def _handle_publish_task_done(
     task: asyncio.Task, event_type: str, event_count: int, semaphore: asyncio.Semaphore
 ) -> None:
     """
     Callback to handle publish task completion, log errors, and release semaphore.
+
+    DEPRECATED: Use PublishTaskTracker instead for new code.
 
     Args:
         task: Completed publish task
@@ -65,10 +150,9 @@ def _handle_publish_task_done(
         semaphore: Semaphore to release
     """
     try:
-        if task.exception():
+        if not task.cancelled() and task.exception():
             logger.error(
-                f"[REDIS_PUBLISH] Publish task failed for {event_type} (event_count={event_count}): {task.exception()}",
-                exc_info=True,
+                f"[REDIS_PUBLISH] Publish task failed for {event_type} (event_count={event_count}): {task.exception()}"
             )
     except Exception:
         pass  # Ignore errors in callback
@@ -206,7 +290,7 @@ async def _run_chat_activity_async(
 
         # Fetch API keys
         if api_key_ctx is None:
-            api_key_ctx = APIKeyContext.from_user(user_id)
+            api_key_ctx = await APIKeyContext.from_user_async(user_id)
 
         # Create root Langfuse trace if enabled (for activity-level tracing)
         trace_id = None
@@ -259,14 +343,14 @@ async def _run_chat_activity_async(
         resume_payload = state.get("resume_payload")
         if resume_payload:
             logger.info(
-                f"[HITL] [ACTIVITY_RESUME] Activity re-run with resume_payload: session={chat_id}"
+                f"[HITL] [ACTIVITY_RESUME] Activity re-run with resume_payload: session={chat_id}, run_id={resume_payload.get('run_id')}"
             )
 
         # Build AgentRequest or Command for resume
         if resume_payload:
             request = Command(resume=resume_payload)
             logger.info(
-                f"[HITL] Injected resume_payload into workflow: session={chat_id}"
+                f"[HITL] Injected resume_payload into workflow: session={chat_id}, run_id={resume_payload.get('run_id')}"
             )
         else:
             request = AgentRequest(
@@ -335,6 +419,8 @@ async def _run_chat_activity_async(
 
         # Semaphore for backpressure: cap concurrent publish operations
         publish_semaphore = asyncio.Semaphore(REDIS_PUBLISH_CONCURRENCY)
+        # Track publish tasks for proper cleanup before activity returns
+        publish_tracker = PublishTaskTracker(publish_semaphore)
 
         heartbeat_task = asyncio.create_task(heartbeat_loop())
 
@@ -373,18 +459,12 @@ async def _run_chat_activity_async(
                     current_count = event_count[0]
                     try:
                         await publish_semaphore.acquire()
-                        task = asyncio.create_task(
+                        publish_tracker.create_task(
                             _publish_event_async(
                                 publisher, channel, event, current_count, message_buffer
-                            )
-                        )
-                        # Add done callback to release semaphore and log errors
-                        # Semaphore is released in callback, not here, to ensure it's always released
-                        task.add_done_callback(
-                            lambda t,
-                            et=event_type,
-                            ec=current_count,
-                            sem=publish_semaphore: _handle_publish_task_done(t, et, ec, sem)
+                            ),
+                            event_type,
+                            current_count,
                         )
                         # Note: No need for asyncio.sleep(0) - semaphore already throttles and tasks will execute
                     except Exception as e:
@@ -404,13 +484,29 @@ async def _run_chat_activity_async(
                     logger.info(
                         f"[HITL] [INTERRUPT] Workflow interrupted for chat_id={chat_id}, interrupt_data={interrupt_data}"
                     )
-                    # Publish interrupt event to Redis for frontend
+                    # Publish interrupt event to Redis for frontend (tracked for cleanup)
                     if publisher:
-                        asyncio.create_task(
-                            _publish_event_async(
-                                publisher, channel, event, event_count[0], message_buffer
+                        try:
+                            await publish_semaphore.acquire()
+                            publish_tracker.create_task(
+                                _publish_event_async(
+                                    publisher,
+                                    channel,
+                                    event,
+                                    event_count[0],
+                                    message_buffer,
+                                ),
+                                "interrupt",
+                                event_count[0],
                             )
-                        )
+                        except Exception as e:
+                            try:
+                                publish_semaphore.release()
+                            except Exception:
+                                pass
+                            logger.warning(
+                                f"[REDIS_PUBLISH] Failed to publish interrupt event: {e}"
+                            )
                     interrupt_output = ChatActivityOutput(
                         status="interrupted",
                         interrupt_data=interrupt_data,
@@ -418,23 +514,19 @@ async def _run_chat_activity_async(
                     ).dict()
                     break
 
-                # Capture final response (for message_saved event and workflow buffer)
+                # Capture final response (for message_saved event and DB persistence)
                 if event.get("type") == "final":
                     final_response = event.get("response")
                     if final_response and hasattr(final_response, "token_usage"):
                         tokens_used = final_response.token_usage.get("total_tokens", 0)
 
-                    # Add assistant message to workflow buffer instead of immediate DB write
-                    # This optimizes DB operations by batching writes on workflow close
+                    # Save assistant message to DB IMMEDIATELY for durability
+                    # This ensures messages aren't lost if user refreshes before workflow closes
                     if final_response:
                         try:
-                            from app.agents.temporal.workflow_manager import get_workflow_id
-                            from app.core.temporal import get_temporal_client
-
-                            # Get workflow handle to signal
-                            client = await get_temporal_client()
-                            workflow_id = get_workflow_id(user_id, chat_id)
-                            workflow_handle = client.get_workflow_handle(workflow_id)
+                            from asgiref.sync import sync_to_async
+                            from app.services.chat_service import add_message
+                            from app.agents.config import OPENAI_MODEL
 
                             # Extract message data from response
                             content = (
@@ -460,6 +552,7 @@ async def _run_chat_activity_async(
                                         "cached_tokens": final_response.token_usage.get(
                                             "cached_tokens", 0
                                         ),
+                                        "model": OPENAI_MODEL,
                                     }
                                 )
 
@@ -469,55 +562,90 @@ async def _run_chat_activity_async(
                             if hasattr(final_response, "tool_calls"):
                                 metadata["tool_calls"] = final_response.tool_calls
 
-                            # Signal workflow to add message to buffer
-                            await workflow_handle.signal(
-                                "add_message_to_buffer",
-                                args=("assistant", content, metadata, tokens_used),
+                            # Save to DB immediately for durability
+                            saved_message = await sync_to_async(add_message)(
+                                session_id=chat_id,
+                                role="assistant",
+                                content=content,
+                                tokens_used=tokens_used,
+                                metadata=metadata,
                             )
+                            message_id = saved_message.id
                             logger.info(
-                                f"[WORKFLOW_BUFFER] Added assistant message to workflow buffer for session {chat_id}"
+                                f"Saved new assistant message ID={message_id} session={chat_id}"
                             )
                         except Exception as e:
                             logger.warning(
-                                f"[WORKFLOW_BUFFER] Failed to add message to workflow buffer: {e}, will fall back to DB write"
+                                f"[MESSAGE_SAVE] Failed to save assistant message to DB: {e}, will retry on workflow close",
+                                exc_info=True,
                             )
-                            # Continue - save_message_task will handle DB write as fallback
+                            message_id = None
+
+                            # Fallback: Add to workflow buffer for persistence on workflow close
+                            try:
+                                from app.agents.temporal.workflow_manager import (
+                                    get_workflow_id,
+                                )
+                                from app.core.temporal import get_temporal_client
+
+                                client = await get_temporal_client()
+                                workflow_id = get_workflow_id(user_id, chat_id)
+                                workflow_handle = client.get_workflow_handle(
+                                    workflow_id
+                                )
+
+                                await workflow_handle.signal(
+                                    "add_message_to_buffer",
+                                    args=("assistant", content, metadata, tokens_used),
+                                )
+                                logger.info(
+                                    f"[WORKFLOW_BUFFER] Added assistant message to workflow buffer as fallback for session {chat_id}"
+                                )
+                            except Exception as buffer_error:
+                                logger.error(
+                                    f"[WORKFLOW_BUFFER] Failed to add message to workflow buffer: {buffer_error}"
+                                )
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
 
+        # Wait for all pending publish tasks before returning
+        # This prevents CancelledError when activity returns with in-flight tasks
+        await publish_tracker.wait_for_pending(timeout=5.0)
+
         if interrupt_output is not None:
             return interrupt_output
 
         # Emit message_saved event for assistant message after final event
-        # Note: Message is now in workflow buffer, will be persisted on workflow close
-        # For frontend compatibility, we emit a temporary event indicating message is buffered
-        if final_response and redis_client and chat_id:
+        # Now with real DB ID since we save immediately
+        if final_response and redis_client and chat_id and publisher:
             try:
-                # Message is in workflow buffer, not yet in DB
-                # Emit event with temporary indicator that message will be persisted on workflow close
                 message_saved_event = {
                     "type": "message_saved",
                     "data": {
                         "role": "assistant",
-                        "db_id": None,  # Will be assigned when persisted on workflow close
+                        "db_id": message_id,  # Real DB ID (or None if save failed)
                         "session_id": chat_id,
-                        "buffered": True,  # Indicates message is in workflow buffer
+                        "buffered": message_id
+                        is None,  # Only buffered if DB save failed
                     },
                 }
-                # Use fire-and-forget for message_saved event
-                asyncio.create_task(
+                # Track message_saved event for proper cleanup
+                await publish_semaphore.acquire()
+                publish_tracker.create_task(
                     _publish_event_async(
                         publisher,
                         channel,
                         message_saved_event,
                         event_count[0] + 1,
                         message_buffer,
-                    )
+                    ),
+                    "message_saved",
+                    event_count[0] + 1,
                 )
                 logger.info(
-                    f"[MESSAGE_SAVED_EVENT] Emitted buffered assistant message event for session={chat_id}"
+                    f"[MESSAGE_SAVED_EVENT] Emitted assistant message event for session={chat_id} db_id={message_id}"
                 )
             except Exception as e:
                 logger.warning(
@@ -534,15 +662,24 @@ async def _run_chat_activity_async(
                     "trace_id": trace_id,
                 },
             }
-            asyncio.create_task(
-                _publish_event_async(
-                    publisher,
-                    channel,
-                    done_event,
+            try:
+                await publish_semaphore.acquire()
+                publish_tracker.create_task(
+                    _publish_event_async(
+                        publisher,
+                        channel,
+                        done_event,
+                        event_count[0] + 1,
+                        message_buffer,
+                    ),
+                    "done",
                     event_count[0] + 1,
-                    message_buffer,
                 )
-            )
+            except Exception as e:
+                logger.warning(f"Failed to publish done event: {e}")
+
+        # Wait for final publish tasks before proceeding to cleanup
+        await publish_tracker.wait_for_pending(timeout=5.0)
 
         # End Langfuse trace if created and flush traces
         if langfuse_trace:
@@ -614,7 +751,14 @@ def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             user_id = input_data.state.get("user_id")
 
         if user_id is not None:
-            api_key_ctx = APIKeyContext.from_user(user_id)
+            try:
+                api_key_ctx = APIKeyContext.from_user(user_id)
+            except Exception as e:
+                # May fail due to Django async context detection
+                logger.debug(
+                    f"Sync API key fetch failed, will retry in async context: {e}"
+                )
+                api_key_ctx = None  # Will be fetched in async context
         else:
             api_key_ctx = APIKeyContext.from_env()
     except Exception as e:

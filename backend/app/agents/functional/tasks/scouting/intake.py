@@ -17,18 +17,18 @@ logger = get_logger(__name__)
 INTAKE_SYSTEM_PROMPT = """You are a sports analyst assistant. Your task is to analyze a user's request and extract:
 
 1. **intent**: The user's intent (should be "scouting_report" for player analysis requests)
-2. **player_name**: The full name of the player being requested
+2. **player_name**: The name of the player being requested (can be first name, last name, or full name)
 3. **sport_guess**: The sport the player plays ("nba" for basketball, "football" for American football, "unknown" if unclear)
 
 Respond in JSON format only:
 {
     "intent": "scouting_report",
-    "player_name": "Full Player Name",
+    "player_name": "Player Name",
     "sport_guess": "nba" | "football" | "unknown"
 }
 
 Rules:
-- Extract the most likely full name from the request
+- Extract any player name mentioned (first name, last name, or full name)
 - Use context clues to determine sport (NBA team names, football positions, etc.)
 - If you cannot determine the player name, set player_name to null
 - Always return valid JSON"""
@@ -73,8 +73,11 @@ def intake_and_route_scouting(
     response = llm.invoke(messages)
     content = response.content.strip()
 
+    logger.info(f"[INTAKE] LLM response: {content[:500]}")
+
     # Parse JSON response
     import json
+
     try:
         # Handle potential markdown code blocks
         if content.startswith("```"):
@@ -83,6 +86,7 @@ def intake_and_route_scouting(
                 content = content[4:]
 
         data = json.loads(content)
+        logger.info(f"[INTAKE] Parsed data: {data}")
     except json.JSONDecodeError as e:
         logger.error(f"[INTAKE] Failed to parse LLM response: {content}")
         raise ValueError(f"Failed to parse intake response: {e}")
@@ -102,8 +106,7 @@ def intake_and_route_scouting(
     )
 
     logger.info(
-        f"[INTAKE] Extracted: player={result.player_name}, "
-        f"sport={result.sport_guess}"
+        f"[INTAKE] Extracted: player={result.player_name}, sport={result.sport_guess}"
     )
 
     return result

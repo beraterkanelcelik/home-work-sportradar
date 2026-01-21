@@ -84,6 +84,8 @@ urlpatterns = [
     path("api/agent/stream/", agent.stream_agent, name="stream_agent"),
     path("api/agent/approve-tool/", agent.approve_tool, name="approve_tool"),
     path("api/agent/approve-plan/", agent.approve_plan, name="approve_plan"),
+    path("api/agent/approve-player/", agent.approve_player, name="approve_player"),
+    path("api/scout-reports/", agent.list_scout_reports, name="list_scout_reports"),
     # RAG
     path("api/rag/query/", rag.rag_query, name="rag_query"),
     # Models

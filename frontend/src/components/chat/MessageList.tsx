@@ -15,6 +15,7 @@
 import React, { useEffect, useRef } from 'react'
 import type { Message } from '@/state/useChatStore'
 import type { PlanProposalData } from '@/components/PlanProposal'
+import type { PlayerPreviewData } from '@/components/PlayerPreview'
 import MessageItem, { type MessageItemProps } from './MessageItem'
 
 interface MessageListProps {
@@ -40,6 +41,16 @@ interface MessageListProps {
   onPlanRejection: (messageId: number) => void
   /** ID of message currently executing a plan */
   executingPlanMessageId: number | null
+  /** Callback when user approves a player */
+  onApprovePlayer?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
+  /** Callback when user rejects a player */
+  onRejectPlayer?: (messageId: number) => void
+  /** Callback when user edits player wording */
+  onEditPlayerWording?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
+  /** Callback when user edits player content with feedback */
+  onEditPlayerContent?: (messageId: number, playerPreview: PlayerPreviewData, feedback: string) => Promise<void>
+  /** Set of player message IDs currently being approved */
+  approvingPlayers?: Set<number>
   /** User email (for user avatar) */
   userEmail?: string | null
 }
@@ -65,6 +76,11 @@ export default function MessageList({
   onPlanApproval,
   onPlanRejection,
   executingPlanMessageId,
+  onApprovePlayer,
+  onRejectPlayer,
+  onEditPlayerWording,
+  onEditPlayerContent,
+  approvingPlayers,
   userEmail,
 }: MessageListProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -106,6 +122,11 @@ export default function MessageList({
             onPlanApproval={onPlanApproval}
             onPlanRejection={onPlanRejection}
             executingPlanMessageId={executingPlanMessageId}
+            onApprovePlayer={onApprovePlayer}
+            onRejectPlayer={onRejectPlayer}
+            onEditPlayerWording={onEditPlayerWording}
+            onEditPlayerContent={onEditPlayerContent}
+            approvingPlayers={approvingPlayers}
             userEmail={userEmail}
           />
         ))}

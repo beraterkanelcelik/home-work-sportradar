@@ -29,7 +29,7 @@ export interface Message {
     task?: string
     is_completed?: boolean
   }
-  response_type?: 'answer' | 'plan_proposal'
+  response_type?: 'answer' | 'plan_proposal' | 'player_preview' | 'coverage_report'
   plan?: {
     type: string
     plan: Array<{
@@ -39,12 +39,36 @@ export interface Message {
       props?: Record<string, any>
       agent: string
       query: string
+      status?: 'pending' | 'in_progress' | 'completed' | 'error'
     }>
     plan_index: number
     plan_total: number
+    player_name?: string
+    sport_guess?: string
+  }
+  plan_progress?: {
+    current_step_index: number
+    total_steps: number
+    steps_status: Record<number, {
+      status: 'pending' | 'in_progress' | 'completed' | 'error'
+      step_name: string
+      result?: string
+    }>
   }
   clarification?: string
   raw_tool_outputs?: Array<Record<string, any>>
+  player_preview?: {
+    player: Record<string, any>
+    report_summary: string[]
+    report_text: string
+    db_payload_preview: Record<string, any>
+  }
+  coverage_report?: {
+    found: string[]
+    missing: string[]
+    confidence: string
+    chunk_count: number
+  }
   status?: string  // Current task/status message (e.g., "Thinking...", "Searching documents...")
   context_usage?: {
     total_tokens: number

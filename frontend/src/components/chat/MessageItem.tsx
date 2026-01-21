@@ -24,6 +24,8 @@ import React from 'react'
 import type { Message } from '@/state/useChatStore'
 import MarkdownMessage from '@/components/MarkdownMessage'
 import PlanProposal, { type PlanProposalData } from '@/components/PlanProposal'
+import PlayerPreview, { type PlayerPreviewData } from '@/components/PlayerPreview'
+import CoverageReport, { type CoverageReportData } from '@/components/CoverageReport'
 import JsonViewer from '@/components/JsonViewer'
 import ToolCallItem, { type ToolCallItemProps } from './ToolCallItem'
 
@@ -52,6 +54,16 @@ export interface MessageItemProps {
   onPlanRejection: (messageId: number) => void
   /** ID of message currently executing a plan */
   executingPlanMessageId: number | null
+  /** Callback when user approves a player */
+  onApprovePlayer?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
+  /** Callback when user rejects a player */
+  onRejectPlayer?: (messageId: number) => void
+  /** Callback when user edits player wording */
+  onEditPlayerWording?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
+  /** Callback when user edits player content with feedback */
+  onEditPlayerContent?: (messageId: number, playerPreview: PlayerPreviewData, feedback: string) => Promise<void>
+  /** Set of player IDs currently being approved */
+  approvingPlayers?: Set<number>
   /** User email (for user avatar) */
   userEmail?: string | null
 }
@@ -82,6 +94,11 @@ export default function MessageItem({
   onPlanApproval,
   onPlanRejection,
   executingPlanMessageId,
+  onApprovePlayer,
+  onRejectPlayer,
+  onEditPlayerWording,
+  onEditPlayerContent,
+  approvingPlayers,
   userEmail,
 }: MessageItemProps) {
   // Helper functions
@@ -96,6 +113,8 @@ export default function MessageItem({
 
   const agentName = getAgentName(message)
   const isPlanProposal = message.response_type === 'plan_proposal' && message.plan
+  const isPlayerPreview = message.response_type === 'player_preview' && message.player_preview
+  const isCoverageReport = message.response_type === 'coverage_report' && message.coverage_report
   const isExecutingPlan = executingPlanMessageId === message.id
   const hasClarification = message.clarification
   const hasRawToolOutputs = message.raw_tool_outputs && message.raw_tool_outputs.length > 0
@@ -184,12 +203,12 @@ export default function MessageItem({
     )
   const onlyHasToolApprovals = !hasContent && !hasPlan && !hasClarificationContent && allToolsAwaitingApproval
   
-  // Show avatar/name only when agent has started writing (content exists) or has tool calls/plan/clarification
+   // Show avatar/name only when agent has started writing (content exists) or has tool calls/plan/clarification/coverage/player
   // BUT hide avatar/name/bubble if message only has tool approvals (no content)
   // When only tool approvals exist, don't show agent info - tool approvals should stand alone
   const shouldShowAgentInfo = message.role === 'assistant' && 
     !onlyHasToolApprovals && 
-    (hasContent || (hasToolCalls && !allToolsAwaitingApproval) || hasPlan || hasClarificationContent)
+    (hasContent || (hasToolCalls && !allToolsAwaitingApproval) || hasPlan || hasClarificationContent || isCoverageReport || isPlayerPreview)
   
   return (
     <div
@@ -213,7 +232,28 @@ export default function MessageItem({
           </div>
         )}
         
-        {/* Tool calls - appear where they occur in the stream, not always at the end */}
+        {/* Coverage Report - shows before player preview */}
+        {isCoverageReport && message.coverage_report && (
+          <div className="mb-3">
+            <CoverageReport coverage={message.coverage_report} />
+          </div>
+        )}
+
+        {/* Player Preview - HITL Gate B */}
+        {isPlayerPreview && message.player_preview && (
+          <div className="mb-3">
+            <PlayerPreview
+              preview={message.player_preview}
+              onApprove={() => onApprovePlayer?.(message.id, message.player_preview!)}
+              onReject={() => onRejectPlayer?.(message.id)}
+              onEditWording={() => onEditPlayerWording?.(message.id, message.player_preview!)}
+              onEditContent={(feedback) => onEditPlayerContent?.(message.id, message.player_preview!, feedback)}
+              isExecuting={approvingPlayers?.has(message.id)}
+            />
+          </div>
+        )}
+        
+        {/* Tool calls - appear where they occur in stream, not always at the end */}
         {/* Tool calls appear in real-time as they're added during streaming, showing the execution flow in order */}
         {message.role === 'assistant' && 
          message.metadata?.tool_calls && 
@@ -275,10 +315,18 @@ export default function MessageItem({
             ) : isPlanProposal && message.plan ? (
               // Plan proposal rendering
               <PlanProposal
-                plan={message.plan}
+                plan={{
+                  ...message.plan,
+                  // Merge step statuses from plan_progress into plan steps
+                  plan: message.plan.plan.map((step, idx) => ({
+                    ...step,
+                    status: message.plan_progress?.steps_status?.[idx]?.status || step.status || 'pending'
+                  }))
+                }}
                 onApprove={() => onPlanApproval(message.id, message.plan!)}
                 onReject={() => onPlanRejection(message.id)}
                 isExecuting={isExecutingPlan}
+                currentStepIndex={message.plan_progress?.current_step_index ?? -1}
               />
             ) : hasClarification ? (
               // Clarification request rendering

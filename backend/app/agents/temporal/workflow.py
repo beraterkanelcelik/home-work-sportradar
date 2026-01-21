@@ -2,6 +2,7 @@
 Temporal workflow definitions for chat execution.
 Long-running workflow per chat session using signals.
 """
+
 import asyncio
 import os
 from dataclasses import dataclass
@@ -17,13 +18,18 @@ from app.agents.temporal.activity import run_chat_activity
 
 # Read timeout from environment variable directly (cannot import from app.settings due to sandbox restrictions)
 # Workflows must be deterministic and cannot import Django settings which may have side effects
-TEMPORAL_APPROVAL_TIMEOUT_MINUTES = int(os.getenv('TEMPORAL_APPROVAL_TIMEOUT_MINUTES', '10'))
-TEMPORAL_ACTIVITY_TIMEOUT_MINUTES = int(os.getenv('TEMPORAL_ACTIVITY_TIMEOUT_MINUTES', '10'))
+TEMPORAL_APPROVAL_TIMEOUT_MINUTES = int(
+    os.getenv("TEMPORAL_APPROVAL_TIMEOUT_MINUTES", "10")
+)
+TEMPORAL_ACTIVITY_TIMEOUT_MINUTES = int(
+    os.getenv("TEMPORAL_ACTIVITY_TIMEOUT_MINUTES", "10")
+)
 
 
 @dataclass
 class ChatActivityInput:
     """Input for chat activity execution."""
+
     chat_id: int
     state: Dict[str, Any]
 
@@ -31,6 +37,7 @@ class ChatActivityInput:
 @dataclass
 class MessageSignal:
     """Signal data for new messages."""
+
     message: str
     plan_steps: Optional[list] = None
     flow: str = "main"
@@ -40,23 +47,23 @@ class MessageSignal:
 class ChatWorkflow:
     """
     Long-running Temporal workflow per chat session.
-    
+
     Features:
     - Waits for signals (new messages) instead of running once
     - Processes messages via activities when signals are received
     - Automatically closes after 5 minutes of inactivity
     - Uses signal_with_start pattern for initialization
-    
+
     Follows Temporal best practices:
     - Signal-based message handling
     - Workflow timeouts for inactivity
     - Activity heartbeating for long-running operations
     """
-    
+
     # Maximum number of processed messages to track before clearing
     # Prevents unbounded memory growth in long-running workflows
     MAX_PROCESSED_MESSAGES = 1000
-    
+
     def __init__(self) -> None:
         """Initialize workflow state."""
         self.pending_messages: deque = deque()
@@ -72,12 +79,21 @@ class ChatWorkflow:
         # In-memory message storage (optimized to reduce DB writes)
         # Messages stay in memory during session, persisted only on close
         self.message_buffer: list = []
-    
+        # Track current run_id for HITL resume (needed for checkpoint thread_id)
+        self.current_run_id: Optional[str] = None
+
     @workflow.signal
-    def new_message(self, message: str, plan_steps: Optional[list] = None, flow: str = "main", run_id: Optional[str] = None, parent_message_id: Optional[int] = None) -> None:
+    def new_message(
+        self,
+        message: str,
+        plan_steps: Optional[list] = None,
+        flow: str = "main",
+        run_id: Optional[str] = None,
+        parent_message_id: Optional[int] = None,
+    ) -> None:
         """
         Signal handler for new messages.
-        
+
         Args:
             message: Message content
             plan_steps: Optional plan steps
@@ -88,7 +104,7 @@ class ChatWorkflow:
         if self.is_closing:
             workflow.logger.warning("Workflow is closing, ignoring new message signal")
             return
-        
+
         # Generate stable message hash for deduplication
         # Priority: run_id (most stable) > parent_message_id > content hash
         if run_id:
@@ -97,19 +113,26 @@ class ChatWorkflow:
             message_hash = f"msg:{parent_message_id}"
         else:
             import hashlib
+
             content = f"{message}:{plan_steps}:{flow}"
             message_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
-            workflow.logger.warning(f"[DEDUPE] No run_id or parent_message_id provided, using content hash session={workflow.info().workflow_id}")
-        
+            workflow.logger.warning(
+                f"[DEDUPE] No run_id or parent_message_id provided, using content hash session={workflow.info().workflow_id}"
+            )
+
         # Check for duplicates atomically
         if message_hash in self.processed_messages:
-            workflow.logger.warning(f"[DUPLICATE_SIGNAL] Ignoring duplicate signal - message already processed session={workflow.info().workflow_id} hash={message_hash}")
+            workflow.logger.warning(
+                f"[DUPLICATE_SIGNAL] Ignoring duplicate signal - message already processed session={workflow.info().workflow_id} hash={message_hash}"
+            )
             return
-        
+
         if any(msg.get("_hash") == message_hash for msg in self.pending_messages):
-            workflow.logger.warning(f"[DUPLICATE_SIGNAL] Ignoring duplicate signal - message already in queue session={workflow.info().workflow_id} hash={message_hash}")
+            workflow.logger.warning(
+                f"[DUPLICATE_SIGNAL] Ignoring duplicate signal - message already in queue session={workflow.info().workflow_id} hash={message_hash}"
+            )
             return
-        
+
         # Add message to queue
         signal_data = {
             "message": message,
@@ -122,13 +145,15 @@ class ChatWorkflow:
         self.pending_messages.append(signal_data)
         # Update last activity time
         self.last_activity_time = workflow.now().timestamp()
-        workflow.logger.info(f"[SIGNAL_RECEIVE] Received message signal session={workflow.info().workflow_id} hash={message_hash} message_preview={message[:50]}... queue_size={len(self.pending_messages)}")
-    
+        workflow.logger.info(
+            f"[SIGNAL_RECEIVE] Received message signal session={workflow.info().workflow_id} hash={message_hash} message_preview={message[:50]}... queue_size={len(self.pending_messages)}"
+        )
+
     @workflow.signal
     def resume(self, resume_payload: Any) -> None:
         """
         Signal handler for resuming interrupted workflow (human-in-the-loop).
-        
+
         Args:
             resume_payload: Resume payload containing approval decisions
                            Expected shape: {"approvals": {"tool_call_id": {"approved": bool, "args": {...}}}}
@@ -136,27 +161,36 @@ class ChatWorkflow:
         if self.is_closing:
             workflow.logger.warning("Workflow is closing, ignoring resume signal")
             return
-        
+
         # Envelope resume_payload with session_id for workflow access
         # This ensures session_id is available when Command(resume=...) is processed
-        chat_id = int(workflow.info().workflow_id.split("-")[-1])  # Extract from workflow_id format: "chat-1-{chat_id}"
+        chat_id = int(
+            workflow.info().workflow_id.split("-")[-1]
+        )  # Extract from workflow_id format: "chat-1-{chat_id}"
         if isinstance(resume_payload, dict):
-            # Add session_id to resume payload so workflow can access it
+            # Add session_id and run_id to resume payload so workflow can access it
+            # run_id is critical for checkpoint thread_id to match the original interrupted request
             enveloped_payload = {
                 "session_id": chat_id,
-                **resume_payload  # Preserve original payload structure
+                "run_id": self.current_run_id,  # Include run_id for checkpoint thread_id matching
+                **resume_payload,  # Preserve original payload structure
             }
         else:
             # If resume_payload is not a dict, wrap it
             enveloped_payload = {
                 "session_id": chat_id,
-                "approvals": resume_payload if isinstance(resume_payload, dict) else {}
+                "run_id": self.current_run_id,  # Include run_id for checkpoint thread_id matching
+                "approvals": resume_payload if isinstance(resume_payload, dict) else {},
             }
-        
+
         self.resume_payload = enveloped_payload
-        workflow.logger.info(f"[HITL] Received resume signal: session_id={chat_id}, resume_payload keys={list(enveloped_payload.keys())} session={workflow.info().workflow_id}")
-        workflow.logger.info(f"[HITL] This signal will wake up wait_condition if workflow is waiting for resume session={workflow.info().workflow_id}")
-    
+        workflow.logger.info(
+            f"[HITL] Received resume signal: session_id={chat_id}, run_id={self.current_run_id}, resume_payload keys={list(enveloped_payload.keys())} session={workflow.info().workflow_id}"
+        )
+        workflow.logger.info(
+            f"[HITL] This signal will wake up wait_condition if workflow is waiting for resume session={workflow.info().workflow_id}"
+        )
+
     @workflow.query
     def get_last_result(self) -> Optional[Dict[str, Any]]:
         """
@@ -181,7 +215,13 @@ class ChatWorkflow:
         return self.message_buffer
 
     @workflow.signal
-    def add_message_to_buffer(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None, tokens_used: int = 0) -> None:
+    def add_message_to_buffer(
+        self,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        tokens_used: int = 0,
+    ) -> None:
         """
         Signal handler to add message to in-memory buffer without persisting to DB.
         Messages are persisted in bulk on workflow close.
@@ -194,24 +234,26 @@ class ChatWorkflow:
             tokens_used: Token usage count
         """
         if self.is_closing:
-            workflow.logger.warning("Workflow is closing, ignoring add_message_to_buffer signal")
+            workflow.logger.warning(
+                "Workflow is closing, ignoring add_message_to_buffer signal"
+            )
             return
-        
+
         message_data = {
             "role": role,
             "content": content,
             "metadata": metadata or {},
             "tokens_used": tokens_used,
-            "timestamp": workflow.now().timestamp()
+            "timestamp": workflow.now().timestamp(),
         }
         self.message_buffer.append(message_data)
-        workflow.logger.debug(f"Added message to buffer via signal: role={role}, buffer_size={len(self.message_buffer)}")
-    
+        workflow.logger.debug(
+            f"Added message to buffer via signal: role={role}, buffer_size={len(self.message_buffer)}"
+        )
+
     @workflow.run
     async def run(
-        self,
-        chat_id: int,
-        initial_state: Optional[Dict[str, Any]] = None
+        self, chat_id: int, initial_state: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Long-running workflow that processes messages via signals.
@@ -227,44 +269,50 @@ class ChatWorkflow:
         return await self._run_v2(chat_id, initial_state)
 
     async def _run_v2(
-        self,
-        chat_id: int,
-        initial_state: Optional[Dict[str, Any]] = None
+        self, chat_id: int, initial_state: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Workflow implementation with improved message processing and synchronization.
         """
-        workflow.logger.info(f"[WORKFLOW_V2] Starting V2 workflow for session {chat_id}")
-        
+        workflow.logger.info(
+            f"[WORKFLOW_V2] Starting V2 workflow for session {chat_id}"
+        )
+
         # Store initial state
         self.initial_state = initial_state or {}
         self.last_activity_time = workflow.now().timestamp()
-        
+
         inactivity_timeout = timedelta(minutes=5)
-        
+
         while not self.is_closing:
             # Check for inactivity
             if self.last_activity_time:
-                elapsed = timedelta(seconds=workflow.now().timestamp() - self.last_activity_time)
+                elapsed = timedelta(
+                    seconds=workflow.now().timestamp() - self.last_activity_time
+                )
                 if elapsed >= inactivity_timeout:
-                    workflow.logger.info(f"Workflow inactive for {elapsed}, closing session {chat_id}")
+                    workflow.logger.info(
+                        f"Workflow inactive for {elapsed}, closing session {chat_id}"
+                    )
                     self.is_closing = True
                     break
-            
+
             # Wait for messages with proper synchronization
             await workflow.wait_condition(
-                lambda: len(self.pending_messages) > 0 or self.resume_payload is not None or self.is_closing
+                lambda: len(self.pending_messages) > 0
+                or self.resume_payload is not None
+                or self.is_closing
             )
-            
+
             if self.resume_payload is not None:
                 # Handle resume
                 payload = self.resume_payload
                 self.resume_payload = None
-                
+
                 # Get state from last processed message or use default
                 user_id = self.initial_state.get("user_id")
                 tenant_id = self.initial_state.get("tenant_id") or user_id
-                
+
                 state_with_resume = {
                     "user_id": user_id,
                     "session_id": chat_id,
@@ -274,44 +322,54 @@ class ChatWorkflow:
                     "org_roles": self.initial_state.get("org_roles", []),
                     "app_roles": self.initial_state.get("app_roles", []),
                 }
-                
+
                 result = await workflow.execute_activity(
                     run_chat_activity,
                     ChatActivityInput(chat_id=chat_id, state=state_with_resume),
-                    start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
+                    start_to_close_timeout=timedelta(
+                        minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES
+                    ),
                     retry_policy=RetryPolicy(
                         maximum_attempts=3,
                         initial_interval=timedelta(seconds=1),
                         maximum_interval=timedelta(seconds=10),
-                        backoff_coefficient=2.0
-                    )
+                        backoff_coefficient=2.0,
+                    ),
                 )
-                
+
                 if result.get("status") == "interrupted":
                     continue
                 else:
                     self.last_activity_time = workflow.now().timestamp()
-            
+
             elif self.pending_messages:
                 # Process next message
                 signal_data = self.pending_messages.popleft()
                 message_hash = signal_data.get("_hash")
-                
+
                 # Check for duplicates
                 if message_hash and message_hash in self.processed_messages:
                     continue
-                
+
                 if message_hash:
                     self.processed_messages.add(message_hash)
                     # Cleanup old hashes (keep last 100)
                     if len(self.processed_messages) > 100:
-                        workflow.logger.debug(f"Clearing processed_messages set (size={len(self.processed_messages)})")
-                        self.processed_messages = set(list(self.processed_messages)[-100:])
-                
+                        workflow.logger.debug(
+                            f"Clearing processed_messages set (size={len(self.processed_messages)})"
+                        )
+                        self.processed_messages = set(
+                            list(self.processed_messages)[-100:]
+                        )
+
+                # Track current run_id for potential HITL resume
+                # This is needed to ensure checkpoint thread_id matches on resume
+                self.current_run_id = signal_data.get("run_id")
+
                 # Prepare state
                 user_id = self.initial_state.get("user_id")
                 tenant_id = self.initial_state.get("tenant_id") or user_id
-                
+
                 state = {
                     "user_id": user_id,
                     "session_id": chat_id,
@@ -325,38 +383,46 @@ class ChatWorkflow:
                     "org_roles": self.initial_state.get("org_roles", []),
                     "app_roles": self.initial_state.get("app_roles", []),
                 }
-                
+
                 # Execute activity
                 result = await workflow.execute_activity(
                     run_chat_activity,
                     ChatActivityInput(chat_id=chat_id, state=state),
-                    start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
+                    start_to_close_timeout=timedelta(
+                        minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES
+                    ),
                     retry_policy=RetryPolicy(
                         maximum_attempts=3,
                         initial_interval=timedelta(seconds=1),
                         maximum_interval=timedelta(seconds=10),
-                        backoff_coefficient=2.0
-                    )
+                        backoff_coefficient=2.0,
+                    ),
                 )
-                
+
                 if result.get("status") == "interrupted":
                     # Wait for resume with timeout
                     try:
                         await workflow.wait_condition(
                             lambda: self.resume_payload is not None,
-                            timeout=timedelta(minutes=TEMPORAL_APPROVAL_TIMEOUT_MINUTES)
+                            timeout=timedelta(
+                                minutes=TEMPORAL_APPROVAL_TIMEOUT_MINUTES
+                            ),
                         )
                         continue
                     except asyncio.TimeoutError:
-                        workflow.logger.warning(f"Approval timeout after {TEMPORAL_APPROVAL_TIMEOUT_MINUTES} minutes for session {chat_id}")
+                        workflow.logger.warning(
+                            f"Approval timeout after {TEMPORAL_APPROVAL_TIMEOUT_MINUTES} minutes for session {chat_id}"
+                        )
                         # Mark workflow as closing due to timeout
                         self.is_closing = True
                         break
                 elif result.get("status") == "completed":
                     self.last_activity_time = workflow.now().timestamp()
                     continue
-        
-        workflow.logger.info(f"Chat workflow V2 closing for session {chat_id}, persisting {len(self.message_buffer)} messages to DB")
+
+        workflow.logger.info(
+            f"Chat workflow V2 closing for session {chat_id}, persisting {len(self.message_buffer)} messages to DB"
+        )
 
         # Persist all buffered messages to database in bulk before closing
         if self.message_buffer:
@@ -372,12 +438,16 @@ class ChatWorkflow:
                         maximum_attempts=3,
                         initial_interval=timedelta(seconds=1),
                         maximum_interval=timedelta(seconds=10),
-                        backoff_coefficient=2.0
-                    )
+                        backoff_coefficient=2.0,
+                    ),
                 )
-                workflow.logger.info(f"Successfully persisted {len(self.message_buffer)} messages for session {chat_id}")
+                workflow.logger.info(
+                    f"Successfully persisted {len(self.message_buffer)} messages for session {chat_id}"
+                )
             except Exception as e:
-                workflow.logger.error(f"Failed to persist messages for session {chat_id}: {e}")
+                workflow.logger.error(
+                    f"Failed to persist messages for session {chat_id}: {e}"
+                )
                 # Don't fail workflow close if persistence fails - messages are in checkpoint
 
         return {
@@ -385,5 +455,5 @@ class ChatWorkflow:
             "chat_id": chat_id,
             "reason": "inactivity_timeout" if self.is_closing else "normal",
             "version": "v2",
-            "messages_persisted": len(self.message_buffer)
+            "messages_persisted": len(self.message_buffer),
         }

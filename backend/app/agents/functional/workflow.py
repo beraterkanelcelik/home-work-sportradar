@@ -32,6 +32,9 @@ from app.agents.functional.tasks import (
 from app.agents.checkpoint import get_checkpoint_config
 from app.core.logging import get_logger
 
+# NOTE: agent_workflow is imported lazily inside ai_agent_workflow_events() to avoid circular import
+# from app.agents.functional.agent_workflow import agent_workflow
+
 logger = get_logger(__name__)
 
 
@@ -562,7 +565,9 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                     reply="Error: Resume requires session context",
                     agent_name="system",
                 )
-            current_user_id = None  # Can't get from Command, but may not be needed for resume
+            current_user_id = (
+                None  # Can't get from Command, but may not be needed for resume
+            )
             current_run_id = None  # Command resume: correlation IDs not available (not needed for resume)
             current_parent_message_id = None
             logger.info(
@@ -579,7 +584,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                 request, "parent_message_id", None
             )  # Parent message ID for correlation
 
-        if isinstance(request, Command) and current_user_id is None and current_session_id:
+        if (
+            isinstance(request, Command)
+            and current_user_id is None
+            and current_session_id
+        ):
             try:
                 from app.db.models.session import ChatSession
 
@@ -596,7 +605,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
             langfuse_public_key = getattr(request, "langfuse_public_key", None)
             langfuse_secret_key = getattr(request, "langfuse_secret_key", None)
         else:
-            api_key_ctx = APIKeyContext.from_user(current_user_id)
+            try:
+                api_key_ctx = APIKeyContext.from_user(current_user_id)
+            except Exception as e:
+                logger.warning(f"Failed to load API key context during resume: {e}")
+                api_key_ctx = APIKeyContext.from_env()
             api_key = api_key_ctx.openai_api_key
             langfuse_public_key = api_key_ctx.langfuse_public_key
             langfuse_secret_key = api_key_ctx.langfuse_secret_key
@@ -644,7 +657,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
             from langchain_core.messages import AIMessage
 
             for msg in reversed(messages):
-                if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                if (
+                    isinstance(msg, AIMessage)
+                    and hasattr(msg, "tool_calls")
+                    and msg.tool_calls
+                ):
                     # Check if tool_calls have "status" indicating they're awaiting approval
                     # We stored them before interrupt with status="pending" or similar
                     tool_calls_data = msg.tool_calls
@@ -685,7 +702,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                 if isinstance(request, Command):
                     # On resume, we need the query - get from last human message
                     last_human_msg = next(
-                        (msg for msg in reversed(messages) if isinstance(msg, HumanMessage)),
+                        (
+                            msg
+                            for msg in reversed(messages)
+                            if isinstance(msg, HumanMessage)
+                        ),
                         None,
                     )
                     query = last_human_msg.content if last_human_msg else ""
@@ -729,7 +750,9 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                     )
 
                 if routing.agent == "scouting":
-                    from app.agents.functional.scouting_workflow import scouting_workflow
+                    from app.agents.functional.scouting_workflow import (
+                        scouting_workflow,
+                    )
 
                     scouting_request = (
                         request
@@ -745,6 +768,17 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                     response = scouting_workflow.invoke(
                         scouting_request, config=checkpoint_config
                     )
+                    if isinstance(response, dict):
+                        logger.info(
+                            "[WORKFLOW] scouting workflow returned interrupted dict "
+                            f"(HITL waiting): type={response.get('type', 'unknown')}"
+                        )
+                        return AgentResponse(
+                            type="answer",
+                            reply="",
+                            agent_name="scouting",
+                            interrupt_data=response,
+                        )
                     logger.info(
                         "[WORKFLOW] scouting workflow returned: "
                         f"has_reply={bool(response.reply)}, "
@@ -769,7 +803,9 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                         ).result()
 
                         # Check if plan was generated
-                        if plan_analysis.get("requires_plan") and plan_analysis.get("plan"):
+                        if plan_analysis.get("requires_plan") and plan_analysis.get(
+                            "plan"
+                        ):
                             plan_steps = plan_analysis["plan"]
                             logger.info(
                                 f"[PLANNING] Generated plan with {len(plan_steps)} steps"
@@ -854,7 +890,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                 routing_agent = "greeter"  # Default
                 if messages:
                     last_ai_msg = next(
-                        (msg for msg in reversed(messages) if isinstance(msg, AIMessage)),
+                        (
+                            msg
+                            for msg in reversed(messages)
+                            if isinstance(msg, AIMessage)
+                        ),
                         None,
                     )
                     if last_ai_msg:
@@ -1026,9 +1066,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
             messages = messages + [ai_message_with_tool_calls]
 
             # Collect tools to execute: auto + manual + approved(approval)
-            tools_to_execute = auto_tools + manual_tools + [
-                tc for tc in approval_tools if tc.get("status") == "approved"
-            ]
+            tools_to_execute = (
+                auto_tools
+                + manual_tools
+                + [tc for tc in approval_tools if tc.get("status") == "approved"]
+            )
 
             # Execute all tools that should run
             all_tool_results = []
@@ -1104,11 +1146,15 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                 try:
                     from app.db.models.message import Message
 
-                    existing_message = Message.objects.filter(
-                        session_id=current_session_id,
-                        role="assistant",
-                        metadata__run_id=current_run_id,
-                    ).order_by("created_at").first()
+                    existing_message = (
+                        Message.objects.filter(
+                            session_id=current_session_id,
+                            role="assistant",
+                            metadata__run_id=current_run_id,
+                        )
+                        .order_by("created_at")
+                        .first()
+                    )
 
                     if existing_message:
                         # Update tool_calls in the existing message with completed statuses
@@ -1213,7 +1259,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                         else "greeter"
                     )
                     last_human_msg = next(
-                        (msg for msg in reversed(messages) if isinstance(msg, HumanMessage)),
+                        (
+                            msg
+                            for msg in reversed(messages)
+                            if isinstance(msg, HumanMessage)
+                        ),
                         None,
                     )
                     refine_query = last_human_msg.content if last_human_msg else ""
@@ -1268,7 +1318,11 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                         else "greeter"
                     )
                     last_human_msg = next(
-                        (msg for msg in reversed(messages) if isinstance(msg, HumanMessage)),
+                        (
+                            msg
+                            for msg in reversed(messages)
+                            if isinstance(msg, HumanMessage)
+                        ),
                         None,
                     )
                     plan_query = last_human_msg.content if last_human_msg else ""
@@ -1409,36 +1463,60 @@ def extract_response_from_chunk(chunk: Any) -> Optional[AgentResponse]:
     Returns:
         AgentResponse if extracted successfully, None otherwise
     """
+    # Log chunk details for debugging
+    if isinstance(chunk, dict):
+        logger.debug(
+            f"[EXTRACT_CHUNK] Dict chunk keys={list(chunk.keys())}, "
+            f"has_ai_agent_workflow={'ai_agent_workflow' in chunk}"
+        )
+        for key, value in chunk.items():
+            logger.debug(
+                f"[EXTRACT_CHUNK] Key '{key}': type={type(value).__name__}, "
+                f"is_AgentResponse={isinstance(value, AgentResponse)}, "
+                f"value_preview={str(value)[:200] if value else 'None'}"
+            )
+    else:
+        logger.debug(
+            f"[EXTRACT_CHUNK] Non-dict chunk: type={type(chunk).__name__}, "
+            f"is_AgentResponse={isinstance(chunk, AgentResponse)}"
+        )
+
     if isinstance(chunk, AgentResponse):
         return chunk
 
     if isinstance(chunk, dict):
-        # Check for 'ai_agent_workflow' key
-        if "ai_agent_workflow" in chunk:
-            response_data = chunk["ai_agent_workflow"]
-            logger.debug(
-                "[STREAM_CHUNK] Found 'ai_agent_workflow' key, "
-                f"response_data type={type(response_data)}"
-            )
-            if isinstance(response_data, AgentResponse):
-                logger.info(
-                    "[STREAM_CHUNK] Extracted AgentResponse from 'ai_agent_workflow' key: "
-                    f"agent={response_data.agent_name}, has_reply={bool(response_data.reply)}"
+        # Check for workflow entrypoint keys
+        # LangGraph uses the function name as the key for the final result
+        for workflow_key in [
+            "agent_workflow",
+            "ai_agent_workflow",
+            "scouting_workflow",
+        ]:
+            if workflow_key in chunk:
+                response_data = chunk[workflow_key]
+                logger.debug(
+                    f"[STREAM_CHUNK] Found '{workflow_key}' key, "
+                    f"response_data type={type(response_data)}"
                 )
-                return response_data
-            if isinstance(response_data, dict):
-                # Try to construct AgentResponse from dict
-                try:
-                    response = AgentResponse(**response_data)
+                if isinstance(response_data, AgentResponse):
                     logger.info(
-                        "[STREAM_CHUNK] Constructed AgentResponse from dict: "
-                        f"agent={response.agent_name}, has_reply={bool(response.reply)}"
+                        f"[STREAM_CHUNK] Extracted AgentResponse from '{workflow_key}' key: "
+                        f"agent={response_data.agent_name}, has_reply={bool(response_data.reply)}"
                     )
-                    return response
-                except Exception as e:
-                    logger.warning(
-                        f"[STREAM_CHUNK] Failed to construct AgentResponse from dict: {e}"
-                    )
+                    return response_data
+                if isinstance(response_data, dict):
+                    # Try to construct AgentResponse from dict
+                    try:
+                        response = AgentResponse(**response_data)
+                        logger.info(
+                            f"[STREAM_CHUNK] Constructed AgentResponse from dict (key='{workflow_key}'): "
+                            f"agent={response.agent_name}, has_reply={bool(response.reply)}"
+                        )
+                        return response
+                    except Exception as e:
+                        logger.warning(
+                            f"[STREAM_CHUNK] Failed to construct AgentResponse from dict: {e}"
+                        )
 
         # Check if chunk itself is response dict
         if any(key in chunk for key in ["agent_name", "reply", "tool_calls", "type"]):
@@ -1461,7 +1539,7 @@ def extract_response_from_chunk(chunk: Any) -> Optional[AgentResponse]:
 def extract_interrupt_value(interrupt_raw: Any) -> Dict[str, Any]:
     """
     Extract interrupt value from LangGraph Interrupt object.
-    Handles multiple formats: tuple, Interrupt object, dict, list.
+    Handles multiple formats: tuple, Interrupt object, dict, list, __interrupt__ wrapper.
 
     Args:
         interrupt_raw: Raw interrupt object from LangGraph (various formats)
@@ -1469,6 +1547,17 @@ def extract_interrupt_value(interrupt_raw: Any) -> Dict[str, Any]:
     Returns:
         Dict with interrupt data (tool_approval info, etc.)
     """
+    # Handle __interrupt__ dict format (from nested workflow invocations)
+    # Format: {'__interrupt__': [Interrupt(value={...}, id='...')]}
+    if isinstance(interrupt_raw, dict) and "__interrupt__" in interrupt_raw:
+        interrupt_list = interrupt_raw["__interrupt__"]
+        if isinstance(interrupt_list, (list, tuple)) and len(interrupt_list) > 0:
+            interrupt_obj = interrupt_list[0]
+            if hasattr(interrupt_obj, "value"):
+                return interrupt_obj.value
+            if isinstance(interrupt_obj, dict) and "value" in interrupt_obj:
+                return interrupt_obj["value"]
+
     # Handle tuple format (most common from LangGraph)
     if isinstance(interrupt_raw, tuple) and len(interrupt_raw) > 0:
         interrupt_obj = interrupt_raw[0]
@@ -1536,7 +1625,9 @@ def is_scouting_resume_payload(payload: Dict[str, Any]) -> bool:
         return True
 
     if payload_type == "plan_approval":
-        return any(key in payload for key in ("player_name", "plan_steps", "query_hints"))
+        return any(
+            key in payload for key in ("player_name", "plan_steps", "query_hints")
+        )
 
     return False
 
@@ -1596,11 +1687,15 @@ def _update_plan_progress(session_id: int, current_step: int, total_steps: int):
             from app.db.models.message import Message
 
             # Find latest plan proposal message
-            latest_plan_msg = Message.objects.filter(
-                session_id=session_id,
-                role="assistant",
-                metadata__response_type="plan_proposal",
-            ).order_by("-created_at").first()
+            latest_plan_msg = (
+                Message.objects.filter(
+                    session_id=session_id,
+                    role="assistant",
+                    metadata__response_type="plan_proposal",
+                )
+                .order_by("-created_at")
+                .first()
+            )
 
             if latest_plan_msg and latest_plan_msg.metadata:
                 if "plan" not in latest_plan_msg.metadata:
@@ -1825,9 +1920,7 @@ def _execute_plan_workflow(
 
         # Add failure notice if execution stopped early
         if failed_step_index is not None:
-            final_text += (
-                f"\n\n⚠️ Plan execution stopped at step {failed_step_index + 1} due to failure."
-            )
+            final_text += f"\n\n⚠️ Plan execution stopped at step {failed_step_index + 1} due to failure."
             logger.warning(
                 "[PLAN_EXEC] Plan execution stopped at step "
                 f"{failed_step_index + 1}/{len(request.plan_steps)}"
@@ -1922,6 +2015,9 @@ async def ai_agent_workflow_events(
     from threading import Thread
     from queue import Queue as ThreadQueue, Empty
 
+    # Lazy import to avoid circular dependency
+    from app.agents.functional.agent_workflow import agent_workflow
+
     # Extract session_id, user_id, trace_id - handle both AgentRequest and Command
     if isinstance(request, AgentRequest):
         session_id = session_id or request.session_id
@@ -1972,18 +2068,35 @@ async def ai_agent_workflow_events(
     callback_handler = EventCallbackHandler(event_queue, status_messages)
 
     # Get checkpoint config
-    thread_id = (
-        f"chat_session_{session_id}"
-        if session_id
-        else f"user_{user_id}"
-        if user_id
-        else "default"
+    # CRITICAL: Use run_id in thread_id to ensure each request gets a fresh checkpoint
+    # This prevents stale approval decisions from being replayed when a new scouting request
+    # comes in on the same session. Without this, LangGraph might replay old checkpoint state.
+    # For resume (Command), we use the run_id stored in the resume payload.
+    run_id = None
+    if isinstance(request, AgentRequest):
+        run_id = getattr(request, "run_id", None)
+    elif (
+        isinstance(request, Command)
+        and hasattr(request, "resume")
+        and isinstance(request.resume, dict)
+    ):
+        run_id = request.resume.get("run_id")
+
+    # Build thread_id with run_id for checkpoint isolation
+    if session_id and run_id:
+        thread_id = f"chat_session_{session_id}_{run_id}"
+    elif session_id:
+        thread_id = f"chat_session_{session_id}"
+    elif user_id:
+        thread_id = f"user_{user_id}"
+    else:
+        thread_id = "default"
+
+    logger.info(
+        f"[CHECKPOINT] Using thread_id={thread_id} for checkpoint (session={session_id}, run_id={run_id})"
     )
-    checkpoint_config = (
-        get_checkpoint_config(session_id)
-        if session_id
-        else {"configurable": {"thread_id": thread_id}}
-    )
+
+    checkpoint_config = {"configurable": {"thread_id": thread_id}}
 
     # Add callbacks to config
     if "callbacks" not in checkpoint_config:
@@ -2005,7 +2118,8 @@ async def ai_agent_workflow_events(
                 public_key = request.langfuse_public_key
                 secret_key = request.langfuse_secret_key
             elif user_id:
-                api_key_ctx = APIKeyContext.from_user(user_id)
+                # Use async version to avoid SynchronousOnlyOperation error in async context
+                api_key_ctx = await APIKeyContext.from_user_async(user_id)
                 public_key = api_key_ctx.langfuse_public_key
                 secret_key = api_key_ctx.langfuse_secret_key
 
@@ -2056,7 +2170,22 @@ async def ai_agent_workflow_events(
                     public_key = request.langfuse_public_key
                     secret_key = request.langfuse_secret_key
                 elif user_id:
-                    api_key_ctx = APIKeyContext.from_user(user_id)
+                    # Use sync_to_async wrapper to avoid Django async context detection issues
+                    # This is needed because even though we're in a thread, Django detects the parent async loop
+                    from asgiref.sync import sync_to_async
+                    import asyncio
+
+                    try:
+                        # Get or create event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        api_key_ctx = loop.run_until_complete(
+                            APIKeyContext.from_user_async(user_id)
+                        )
+                        loop.close()
+                    except Exception as e:
+                        logger.warning(f"Failed to load API key context: {e}")
+                        api_key_ctx = APIKeyContext.from_env()
                     public_key = api_key_ctx.langfuse_public_key
                     secret_key = api_key_ctx.langfuse_secret_key
 
@@ -2090,7 +2219,7 @@ async def ai_agent_workflow_events(
                     with langfuse.start_as_current_observation(
                         as_type="span",
                         trace_context={"trace_id": trace_id},
-                        name="ai_agent_workflow",
+                        name="agent_workflow",
                         metadata={
                             "flow": flow,
                             "has_plan_steps": bool(plan_steps),
@@ -2105,7 +2234,7 @@ async def ai_agent_workflow_events(
                             # The final chunk should contain the AgentResponse
                             # Also detect __interrupt__ chunks for human-in-the-loop
                             chunk_count = 0
-                            for chunk in ai_agent_workflow.stream(
+                            for chunk in agent_workflow.stream(
                                 request, config=checkpoint_config
                             ):
                                 chunk_count += 1
@@ -2164,7 +2293,7 @@ async def ai_agent_workflow_events(
                         f"[LANGFUSE] Client not available, running workflow without Langfuse tracing"
                     )
                     chunk_count = 0
-                    for chunk in ai_agent_workflow.stream(
+                    for chunk in agent_workflow.stream(
                         request, config=checkpoint_config
                     ):
                         chunk_count += 1
@@ -2196,9 +2325,7 @@ async def ai_agent_workflow_events(
             else:
                 # No Langfuse tracing - run without context managers
                 chunk_count = 0
-                for chunk in ai_agent_workflow.stream(
-                    request, config=checkpoint_config
-                ):
+                for chunk in agent_workflow.stream(request, config=checkpoint_config):
                     chunk_count += 1
                     logger.debug(
                         f"[STREAM_CHUNK] Received chunk #{chunk_count}, type={type(chunk)}, keys={list(chunk.keys()) if isinstance(chunk, dict) else 'N/A'}"
@@ -2317,6 +2444,17 @@ async def ai_agent_workflow_events(
     # Yield final response if we have it (get from thread-safe holder)
     final_response = final_response_holder[0]
     if final_response:
+        # Check if response has interrupt_data (from scouting workflow or other nested workflows)
+        # This happens when a nested workflow calls interrupt() and returns a dict
+        if hasattr(final_response, "interrupt_data") and final_response.interrupt_data:
+            logger.info(
+                f"[HITL] [INTERRUPT] Found interrupt_data in final response, yielding interrupt event session={session_id}"
+            )
+            # Extract the actual interrupt value from nested structure (handles __interrupt__, Interrupt objects, etc.)
+            extracted_interrupt = extract_interrupt_value(final_response.interrupt_data)
+            yield {"type": "interrupt", "data": extracted_interrupt}
+            return
+
         # Extract tool_calls and agent_name for update event
         if final_response.tool_calls or final_response.agent_name:
             update_data = {}

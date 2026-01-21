@@ -9,6 +9,7 @@ import DashboardPage from '@/app/DashboardPage'
 import ProfilePage from '@/app/ProfilePage'
 import ChatPage from '@/app/chat/ChatPage'
 import DocumentsPage from '@/app/documents/DocumentsPage'
+import ScoutReportsPage from '@/app/ScoutReportsPage'
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
           <Route path="profile" element={<ProfilePage />} />
           <Route path="chat/:sessionId?" element={<ChatPage />} />
           <Route path="documents" element={<DocumentsPage />} />
+          <Route path="scout-reports" element={<ScoutReportsPage />} />
         </Route>
       </Routes>
       <Toaster position="top-right" />
