@@ -1,44 +1,40 @@
-# Use Python 3.11 slim image as base
+# Simple single-stage build for reliability
 FROM python:3.11-slim
-
-# Set working directory
-WORKDIR /app
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_SYSTEM_PYTHON=1
+    PYTHONPATH=/app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
+    postgresql-client \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast package installation
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Set working directory
+WORKDIR /app
 
-# Install Python dependencies with uv (much faster than pip)
-# Install NumPy first with explicit version to ensure compatibility
-# NumPy 1.26.x doesn't have X86_V2 baseline by default, avoiding CPU compatibility issues
-RUN uv pip install --system --no-cache "numpy>=1.26.0,<2.0.0" && \
-    uv pip install --system --no-cache -r requirements.txt
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy application code
 COPY . /app
 
-# Set working directory
-WORKDIR /app
+# Make scripts executable
+RUN chmod +x /app/create_databases.sh /app/create_minio_bucket.py
 
 # Create directory for static files
 RUN mkdir -p /app/staticfiles
 
-# Expose Django default port
+# Expose port
 EXPOSE 8000
 
-# Default command (can be overridden in docker-compose)
-# Use uvicorn for ASGI support (required for async views)
-CMD ["uvicorn", "app.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
+# Default command
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

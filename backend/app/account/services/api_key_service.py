@@ -5,6 +5,8 @@ Handles storage and retrieval of user API keys with encryption.
 """
 
 from typing import Dict, Any, Optional
+from datetime import datetime
+from asgiref.sync import sync_to_async
 
 from app.account.models import User
 from app.core.logging import get_logger
@@ -24,6 +26,8 @@ def get_user_api_keys_status(user_id: int) -> Optional[Dict[str, Any]]:
     """
     try:
         user = User.objects.get(id=user_id)
+        api_keys_complete = user.has_custom_openai_key() and user.has_custom_langfuse_keys()
+        api_keys_validated = bool(user.api_keys_validated and api_keys_complete)
         return {
             "openai_api_key": {
                 "is_set": user.has_custom_openai_key(),
@@ -38,6 +42,11 @@ def get_user_api_keys_status(user_id: int) -> Optional[Dict[str, Any]]:
                 "source": "user" if user._langfuse_secret_key else "unset",
             },
             "langfuse_keys_complete": user.has_custom_langfuse_keys(),
+            "api_keys_complete": api_keys_complete,
+            "api_keys_validated": api_keys_validated,
+            "api_keys_validated_at": user.api_keys_validated_at.isoformat()
+            if api_keys_validated and user.api_keys_validated_at
+            else None,
         }
     except User.DoesNotExist:
         logger.warning(f"User {user_id} not found when getting API key status")
@@ -49,6 +58,8 @@ def update_user_api_keys(
     openai_api_key: Optional[str] = None,
     langfuse_public_key: Optional[str] = None,
     langfuse_secret_key: Optional[str] = None,
+    api_keys_validated: Optional[bool] = None,
+    api_keys_validated_at: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Update user API keys (encrypts and stores).
@@ -82,6 +93,17 @@ def update_user_api_keys(
             user.langfuse_secret_key = langfuse_secret_key
             fields_to_update.append("_langfuse_secret_key")
             logger.info(f"Updated Langfuse secret key for user {user_id}")
+
+        if api_keys_validated is not None:
+            user.api_keys_validated = api_keys_validated
+            fields_to_update.append("api_keys_validated")
+            if not api_keys_validated:
+                user.api_keys_validated_at = None
+                fields_to_update.append("api_keys_validated_at")
+
+        if api_keys_validated_at is not None:
+            user.api_keys_validated_at = api_keys_validated_at
+            fields_to_update.append("api_keys_validated_at")
 
         if fields_to_update:
             user.save(update_fields=fields_to_update)
@@ -150,3 +172,28 @@ def get_effective_langfuse_keys(user_id: int) -> Dict[str, str]:
         "public_key": "",
         "secret_key": "",
     }
+
+
+# =============================================================================
+# Async versions for use in async contexts (e.g., Temporal activities)
+# =============================================================================
+
+
+async def get_effective_openai_key_async(user_id: int) -> str:
+    """
+    Async version of get_effective_openai_key.
+
+    Returns user's custom key if set; otherwise returns empty string.
+    Safe to call from async contexts like Temporal activities.
+    """
+    return await sync_to_async(get_effective_openai_key, thread_sensitive=True)(user_id)
+
+
+async def get_effective_langfuse_keys_async(user_id: int) -> Dict[str, str]:
+    """
+    Async version of get_effective_langfuse_keys.
+
+    Returns user's custom keys if both are set; otherwise returns empty strings.
+    Safe to call from async contexts like Temporal activities.
+    """
+    return await sync_to_async(get_effective_langfuse_keys, thread_sensitive=True)(user_id)

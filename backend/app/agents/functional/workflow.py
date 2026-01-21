@@ -2074,6 +2074,41 @@ async def ai_agent_workflow_events(
                                     f"[HITL] [INTERRUPT] Interrupt detected in Langfuse branch session={session_id}"
                                 )
                                 return
+                else:
+                    # Langfuse enabled but client not available - run without tracing
+                    logger.debug(
+                        f"[LANGFUSE] Client not available, running workflow without Langfuse tracing"
+                    )
+                    chunk_count = 0
+                    for chunk in ai_agent_workflow.stream(
+                        request, config=checkpoint_config
+                    ):
+                        chunk_count += 1
+                        logger.debug(
+                            f"[STREAM_CHUNK] Received chunk #{chunk_count}, type={type(chunk)}, keys={list(chunk.keys()) if isinstance(chunk, dict) else 'N/A'}"
+                        )
+
+                        # Check for interrupt (LangGraph native interrupt pattern)
+                        if isinstance(chunk, dict) and "__interrupt__" in chunk:
+                            interrupt_holder[0] = chunk["__interrupt__"]
+                            logger.info(
+                                f"[HITL] [INTERRUPT] Detected __interrupt__ in stream chunk session={session_id}"
+                            )
+                            break
+
+                        # Extract response from chunk using helper function
+                        extracted_response = extract_response_from_chunk(chunk)
+                        if extracted_response:
+                            final_response_holder[0] = extracted_response
+
+                    if final_response_holder[0]:
+                        logger.info(
+                            f"[STREAM_CHUNK] Final response extracted successfully: agent={final_response_holder[0].agent_name}, type={final_response_holder[0].type}, has_reply={bool(final_response_holder[0].reply)}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[STREAM_CHUNK] No final response extracted after {chunk_count} chunks"
+                        )
             else:
                 # No Langfuse tracing - run without context managers
                 chunk_count = 0

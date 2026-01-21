@@ -78,3 +78,76 @@ def validate_langfuse_keys(public_key: str, secret_key: str) -> Tuple[bool, str]
     except Exception as exc:
         logger.warning(f"Langfuse key validation failed: {exc}")
         return False, "Unable to validate Langfuse keys. Please verify and try again."
+
+
+def validate_api_keys_bundle(
+    openai_key: str, langfuse_public_key: str, langfuse_secret_key: str
+) -> Tuple[bool, str]:
+    """Validate OpenAI + Langfuse keys together with a traced OpenAI call.
+
+    Returns (is_valid, message).
+    """
+    if not openai_key or not langfuse_public_key or not langfuse_secret_key:
+        return False, "OpenAI and both Langfuse keys are required together"
+
+    if not openai_key.startswith("sk-"):
+        return False, "OpenAI API key should start with 'sk-'"
+    if not langfuse_public_key.startswith("pk-"):
+        return False, "Langfuse public key should start with 'pk-'"
+    if not langfuse_secret_key.startswith("sk-"):
+        return False, "Langfuse secret key should start with 'sk-'"
+
+    base_url = os.getenv("LANGFUSE_BASE_URL", "http://langfuse:3000")
+    langfuse_client = None
+
+    try:
+        from langfuse import Langfuse
+        from langfuse.langchain import CallbackHandler
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage
+        from app.agents.config import OPENAI_MODEL
+
+        langfuse_client = Langfuse(
+            public_key=langfuse_public_key,
+            secret_key=langfuse_secret_key,
+            host=base_url,
+        )
+
+        if hasattr(langfuse_client, "auth_check"):
+            ok = langfuse_client.auth_check()
+            if ok is not True:
+                return False, "Unable to validate Langfuse keys"
+        elif hasattr(langfuse_client, "fetch_project"):
+            langfuse_client.fetch_project()
+
+        callback_handler = CallbackHandler(public_key=langfuse_public_key)
+        llm = ChatOpenAI(
+            model=OPENAI_MODEL,
+            api_key=openai_key,
+            temperature=0,
+            max_tokens=1,
+        )
+        llm.invoke(
+            [HumanMessage(content="Respond with 'ok'.")],
+            config={
+                "callbacks": [callback_handler],
+                "metadata": {"source": "api_key_validation"},
+            },
+        )
+
+        if hasattr(langfuse_client, "flush"):
+            langfuse_client.flush()
+
+        return True, "API keys validated successfully"
+    except Exception as exc:
+        logger.warning(f"API key bundle validation failed: {exc}", exc_info=True)
+        return (
+            False,
+            "Unable to validate OpenAI and Langfuse keys together. Please verify all three keys and try again.",
+        )
+    finally:
+        if langfuse_client and hasattr(langfuse_client, "shutdown"):
+            try:
+                langfuse_client.shutdown()
+            except Exception:
+                pass

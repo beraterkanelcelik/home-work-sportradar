@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 from app.account.services.api_key_service import (
     get_effective_openai_key,
     get_effective_langfuse_keys,
+    get_effective_openai_key_async,
+    get_effective_langfuse_keys_async,
 )
 
 
@@ -27,6 +29,24 @@ class APIKeyContext:
 
         openai_key = get_effective_openai_key(user_id)
         langfuse_keys = get_effective_langfuse_keys(user_id)
+        return cls(
+            openai_api_key=openai_key,
+            langfuse_public_key=langfuse_keys.get("public_key", ""),
+            langfuse_secret_key=langfuse_keys.get("secret_key", ""),
+        )
+
+    @classmethod
+    async def from_user_async(cls, user_id: Optional[int]):
+        """
+        Async version of from_user for use in async contexts.
+
+        Safe to call from Temporal activities and other async code.
+        """
+        if user_id is None:
+            return cls.from_env()
+
+        openai_key = await get_effective_openai_key_async(user_id)
+        langfuse_keys = await get_effective_langfuse_keys_async(user_id)
         return cls(
             openai_api_key=openai_key,
             langfuse_public_key=langfuse_keys.get("public_key", ""),

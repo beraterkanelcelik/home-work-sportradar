@@ -1,70 +1,29 @@
-# Django web framework
+# Core Django dependencies only - keeps web container lightweight
 Django>=5.0.0
-
-# PostgreSQL adapter
-psycopg2-binary>=2.9.9  # For Django
-psycopg[binary]>=3.1.0  # For langgraph-checkpoint-postgres
-
-# Core LangChain dependencies (latest)
+djangorestframework>=3.14.0
+djangorestframework-simplejwt>=5.3.0
+django-cors-headers>=4.3.0
+python-dotenv>=1.0.0
+uvicorn[standard]>=0.24.0
+gunicorn>=21.2.0
+psycopg[binary]>=3.1.0
+redis>=5.0.0
+prometheus-client>=0.19.0
+cryptography>=41.0.0
+pgvector>=0.2.0
+langfuse>=3.0.0
+# --- LangChain / Agents (latest, minimal) ---
 langchain>=0.1.0
 langchain-core>=0.1.0
 langchain-openai>=0.1.0
+
+# --- LangGraph (state machines / agents) ---
 langgraph>=0.0.40
+
+# --- LangGraph persistence (Postgres) ---
 langgraph-checkpoint-postgres>=2.0.0
 
-# LangSmith for tracing and observability (optional, kept for compatibility)
-langsmith>=0.0.80
-
-# Langfuse for AI tracing and observability (v3 SDK - latest)
-# Compatible with Langfuse server v3+ and LangChain latest
+# --- Langfuse observability ---
 langfuse>=3.0.0
-
-# Environment variable management
-python-dotenv>=1.0.0
-
-# ASGI server for async views (development and production)
-uvicorn[standard]>=0.24.0
-# WSGI server for production (if needed for sync-only deployments)
-gunicorn>=21.2.0
-
-# REST Framework
-djangorestframework>=3.14.0
-djangorestframework-simplejwt>=5.3.0
-
-# CORS
-django-cors-headers>=4.3.0
-
-# PDF extraction
-pypdf>=3.0.0
-pdfplumber>=0.10.0  # Better layout-aware extraction, table support
-PyMuPDF>=1.23.0  # Fast PDF extraction (fitz)
-pdf2image>=1.16.0  # PDF to image conversion for OCR
-pytesseract>=0.3.10  # OCR engine wrapper
-Pillow>=10.0.0  # Image processing (for OCR)
-
-# Token counting
-tiktoken>=0.5.0  # Accurate token counting for OpenAI models
-
-# NLP for semantic chunking (optional)
-spacy>=3.7.0
-
-# Vector database support
-pgvector>=0.2.0
-# NumPy compatibility for older CPUs (before x86-64-v2 requirement)
-# Use 1.26.x series which doesn't have X86_V2 baseline by default
-numpy>=1.26.0,<2.0.0
-
-# Reranking
+temporalio==1.11.1
 cohere>=4.0.0
-
-# Temporal for workflow orchestration
-temporalio>=1.8.0
-
-# Redis for pub/sub streaming
-redis>=5.0.0
-
-# Metrics and monitoring
-prometheus-client>=0.19.0
-
-# Cryptography for API key encryption
-cryptography>=41.0.0

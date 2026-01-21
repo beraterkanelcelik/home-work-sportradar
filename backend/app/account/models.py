@@ -65,6 +65,16 @@ class User(AbstractUser):
         db_column='langfuse_secret_key_encrypted',
         help_text="Encrypted Langfuse secret key"
     )
+
+    api_keys_validated = models.BooleanField(
+        default=False,
+        help_text="Whether the current API key bundle was validated successfully",
+    )
+    api_keys_validated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the last successful API key validation",
+    )
     
     # Use email as username
     USERNAME_FIELD = 'email'
@@ -172,8 +182,12 @@ class User(AbstractUser):
         self._openai_api_key = ''
         self._langfuse_public_key = ''
         self._langfuse_secret_key = ''
+        self.api_keys_validated = False
+        self.api_keys_validated_at = None
         self.save(update_fields=[
             '_openai_api_key',
             '_langfuse_public_key',
-            '_langfuse_secret_key'
+            '_langfuse_secret_key',
+            'api_keys_validated',
+            'api_keys_validated_at',
         ])

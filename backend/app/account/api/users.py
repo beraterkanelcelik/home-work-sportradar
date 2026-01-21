@@ -17,10 +17,8 @@ from app.account.services.api_key_service import (
     update_user_api_keys,
     clear_user_api_keys,
 )
-from app.account.services.api_key_validator import (
-    validate_openai_key,
-    validate_langfuse_keys,
-)
+from django.utils import timezone
+from app.account.services.api_key_validator import validate_api_keys_bundle
 
 
 @csrf_exempt
@@ -123,36 +121,56 @@ def update_user_api_keys_endpoint(request):
     langfuse_public = data.get("langfuse_public_key")
     langfuse_secret = data.get("langfuse_secret_key")
 
-    # Validate pair constraint for Langfuse
-    if (langfuse_public and not langfuse_secret) or (
-        langfuse_secret and not langfuse_public
-    ):
-        return JsonResponse(
-            {"error": "Both Langfuse public and secret keys are required together"},
-            status=400,
-        )
+    key_values = [openai_key, langfuse_public, langfuse_secret]
+    non_empty_keys = [value for value in key_values if value not in (None, "")]
+    empty_keys = [value for value in key_values if value == ""]
 
-    # Validate OpenAI key if provided (empty string clears)
-    if openai_key not in (None, ""):
-        ok, msg = validate_openai_key(openai_key)
+    if non_empty_keys:
+        if len(non_empty_keys) != 3:
+            return JsonResponse(
+                {
+                    "error": "OpenAI and both Langfuse keys must be provided together"
+                },
+                status=400,
+            )
+        ok, msg = validate_api_keys_bundle(
+            openai_key or "",
+            langfuse_public or "",
+            langfuse_secret or "",
+        )
         if not ok:
             return JsonResponse({"error": msg}, status=400)
 
-    # Validate Langfuse keys if provided (empty string clears)
-    if langfuse_public not in (None, "") or langfuse_secret not in (None, ""):
-        if langfuse_public or langfuse_secret:
-            ok, msg = validate_langfuse_keys(
-                langfuse_public or "", langfuse_secret or ""
+        status_payload = update_user_api_keys(
+            user_id=user.id,
+            openai_api_key=openai_key,
+            langfuse_public_key=langfuse_public,
+            langfuse_secret_key=langfuse_secret,
+            api_keys_validated=True,
+            api_keys_validated_at=timezone.now(),
+        )
+    elif empty_keys:
+        if len(empty_keys) != 3:
+            return JsonResponse(
+                {
+                    "error": "OpenAI and both Langfuse keys must be provided together"
+                },
+                status=400,
             )
-            if not ok:
-                return JsonResponse({"error": msg}, status=400)
-
-    status_payload = update_user_api_keys(
-        user_id=user.id,
-        openai_api_key=openai_key,
-        langfuse_public_key=langfuse_public,
-        langfuse_secret_key=langfuse_secret,
-    )
+        status_payload = update_user_api_keys(
+            user_id=user.id,
+            openai_api_key=openai_key,
+            langfuse_public_key=langfuse_public,
+            langfuse_secret_key=langfuse_secret,
+            api_keys_validated=False,
+        )
+    else:
+        status_payload = update_user_api_keys(
+            user_id=user.id,
+            openai_api_key=openai_key,
+            langfuse_public_key=langfuse_public,
+            langfuse_secret_key=langfuse_secret,
+        )
     if status_payload is None:
         return JsonResponse({"error": "User not found"}, status=404)
     return JsonResponse({"message": "API keys updated", "status": status_payload})

@@ -1,10 +1,12 @@
 """
-Langfuse AI tracing and observability hooks (v3 SDK).
+Langfuse AI tracing and observability hooks (v3 SDK) - WITH CLIENT CACHING.
 
 SDK v3 uses OpenTelemetry and works with Langfuse server v3+.
 Reference: https://python.reference.langfuse.com/langfuse
 """
 
+import threading
+import time
 from typing import Optional, Dict, Any
 from langfuse.langchain import CallbackHandler
 from app.core.config import (
@@ -15,6 +17,14 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Thread-safe cache for Langfuse clients (keyed by public_key)
+_user_langfuse_clients: Dict[str, "Langfuse"] = {}
+_user_callback_handlers: Dict[str, CallbackHandler] = {}
+_callback_failure_timestamps: Dict[str, float] = {}
+_client_lock = threading.Lock()
+_CALLBACK_HANDLER_TIMEOUT_SECONDS = 2.0
+_CALLBACK_FAILURE_TTL_SECONDS = 60.0
+
 
 def get_langfuse_client():
     """Env-backed Langfuse client is disabled (per-user keys only)."""
@@ -22,22 +32,41 @@ def get_langfuse_client():
 
 
 def get_langfuse_client_for_user(public_key: str, secret_key: str):
-    """Create a Langfuse client for user-provided keys (no singleton)."""
+    """
+    Get or create a cached Langfuse client for user-provided keys.
+
+    Clients are cached by public_key to prevent memory leaks from
+    creating new clients (and their background threads) on every request.
+    """
     if not LANGFUSE_ENABLED:
         return None
     if not public_key or not secret_key:
         return None
-    try:
-        from langfuse import Langfuse
 
-        return Langfuse(
-            public_key=public_key,
-            secret_key=secret_key,
-            host=LANGFUSE_BASE_URL,
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Langfuse client for user: {e}", exc_info=True)
-        return None
+    cache_key = public_key
+
+    with _client_lock:
+        # Return cached client if exists
+        if cache_key in _user_langfuse_clients:
+            return _user_langfuse_clients[cache_key]
+
+        # Create new client and cache it
+        try:
+            from langfuse import Langfuse
+
+            client = Langfuse(
+                public_key=public_key,
+                secret_key=secret_key,
+                host=LANGFUSE_BASE_URL,
+            )
+            _user_langfuse_clients[cache_key] = client
+            logger.debug(
+                f"Created and cached Langfuse client for key: {cache_key[:8]}..."
+            )
+            return client
+        except Exception as e:
+            logger.error(f"Failed to create Langfuse client: {e}", exc_info=True)
+            return None
 
 
 def get_callback_handler() -> Optional[CallbackHandler]:
@@ -48,21 +77,106 @@ def get_callback_handler() -> Optional[CallbackHandler]:
 def get_callback_handler_for_user(
     public_key: str, secret_key: str
 ) -> Optional[CallbackHandler]:
-    """Get Langfuse CallbackHandler using user-provided keys."""
+    """
+    Get Langfuse CallbackHandler using cached client.
+
+    Reuses the cached Langfuse client to prevent memory leaks.
+    """
     if not LANGFUSE_ENABLED:
         return None
     if not public_key or not secret_key:
         return None
-    try:
-        from langfuse import Langfuse
 
-        client = Langfuse(
-            public_key=public_key, secret_key=secret_key, host=LANGFUSE_BASE_URL
-        )
-        return CallbackHandler(client=client)
-    except Exception as e:
-        logger.error(f"Failed to create CallbackHandler for user: {e}", exc_info=True)
-        return None
+    cache_key = public_key
+
+    with _client_lock:
+        # Return cached handler if exists
+        if cache_key in _user_callback_handlers:
+            return _user_callback_handlers[cache_key]
+
+        last_failure = _callback_failure_timestamps.get(cache_key)
+        if last_failure and (time.time() - last_failure) < _CALLBACK_FAILURE_TTL_SECONDS:
+            return None
+
+        # Get or create client, then create handler
+        try:
+            handler_holder: Dict[str, Optional[CallbackHandler]] = {"handler": None}
+            error_holder: Dict[str, Optional[Exception]] = {"error": None}
+
+            def _build_handler() -> None:
+                try:
+                    client = get_langfuse_client_for_user(public_key, secret_key)
+                    if not client:
+                        return
+                    handler_holder["handler"] = CallbackHandler(public_key=public_key)
+                except Exception as e:
+                    error_holder["error"] = e
+
+            worker = threading.Thread(target=_build_handler, daemon=True)
+            worker.start()
+            worker.join(_CALLBACK_HANDLER_TIMEOUT_SECONDS)
+
+            if worker.is_alive():
+                _callback_failure_timestamps[cache_key] = time.time()
+                logger.warning(
+                    f"Langfuse CallbackHandler creation timed out after {_CALLBACK_HANDLER_TIMEOUT_SECONDS}s"
+                )
+                return None
+
+            if error_holder["error"]:
+                raise error_holder["error"]
+
+            handler = handler_holder["handler"]
+            if handler is None:
+                _callback_failure_timestamps[cache_key] = time.time()
+                return None
+
+            _user_callback_handlers[cache_key] = handler
+            logger.debug(
+                f"Created and cached CallbackHandler for key: {cache_key[:8]}..."
+            )
+            return handler
+        except Exception as e:
+            _callback_failure_timestamps[cache_key] = time.time()
+            logger.error(f"Failed to create CallbackHandler: {e}", exc_info=True)
+            return None
+
+
+def cleanup_user_client(public_key: str):
+    """
+    Remove and flush a specific user's Langfuse client from cache.
+
+    Call this when a user logs out or changes their API keys.
+    """
+    with _client_lock:
+        if public_key in _user_langfuse_clients:
+            client = _user_langfuse_clients.pop(public_key)
+            try:
+                client.flush()
+                client.shutdown()
+            except Exception as e:
+                logger.warning(f"Error during client cleanup: {e}")
+
+        _user_callback_handlers.pop(public_key, None)
+
+
+def cleanup_all_clients():
+    """
+    Flush and shutdown all cached Langfuse clients.
+
+    Call this during application shutdown.
+    """
+    with _client_lock:
+        for key, client in list(_user_langfuse_clients.items()):
+            try:
+                client.flush()
+                client.shutdown()
+                logger.debug(f"Cleaned up Langfuse client: {key[:8]}...")
+            except Exception as e:
+                logger.warning(f"Error cleaning up client {key[:8]}: {e}")
+
+        _user_langfuse_clients.clear()
+        _user_callback_handlers.clear()
 
 
 def prepare_trace_context(
@@ -92,11 +206,13 @@ def prepare_trace_context(
         context["session_id"] = str(session_id)
 
     if metadata:
-        # Convert metadata values to strings (required by propagate_attributes)
+        metadata_payload: Dict[str, str] = {}
         for key, value in metadata.items():
-            context[f"metadata.{key}"] = (
-                str(value) if not isinstance(value, str) else value
-            )
+            if value is None:
+                continue
+            metadata_payload[str(key)] = value if isinstance(value, str) else str(value)
+        if metadata_payload:
+            context["metadata"] = metadata_payload
 
     return context
 

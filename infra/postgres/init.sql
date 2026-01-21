@@ -4,8 +4,9 @@
 -- Create extensions
 \i /docker-entrypoint-initdb.d/extensions.sql
 
--- Create Langfuse database
+-- Create databases
 CREATE DATABASE langfuse_db;
+CREATE DATABASE temporal_db;
 
 -- Configure PostgreSQL for high concurrency
 -- Note: These settings are also in postgresql.conf, but we set them here

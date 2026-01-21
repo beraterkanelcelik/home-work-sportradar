@@ -279,7 +279,6 @@ class ChatWorkflow:
                     run_chat_activity,
                     ChatActivityInput(chat_id=chat_id, state=state_with_resume),
                     start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
-                    heartbeat_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(
                         maximum_attempts=3,
                         initial_interval=timedelta(seconds=1),
@@ -332,7 +331,6 @@ class ChatWorkflow:
                     run_chat_activity,
                     ChatActivityInput(chat_id=chat_id, state=state),
                     start_to_close_timeout=timedelta(minutes=TEMPORAL_ACTIVITY_TIMEOUT_MINUTES),
-                    heartbeat_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(
                         maximum_attempts=3,
                         initial_interval=timedelta(seconds=1),

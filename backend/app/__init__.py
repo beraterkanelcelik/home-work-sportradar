@@ -1,7 +1,7 @@
 """
 Django app initialization.
 """
-# Initialize logging early
-from app.core import logging  # noqa: F401
+# Logging will be initialized lazily when needed
+# from app.core import logging  # noqa: F401
 
-default_app_config = 'app.apps.AppConfig'
+default_app_config = "app.apps.AppConfig"

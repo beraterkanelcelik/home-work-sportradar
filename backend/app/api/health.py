@@ -2,12 +2,14 @@
 Health check endpoint.
 """
 import os
+import socket
+from urllib.parse import urlparse
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.db import connection
 from django.core.cache import cache
 from app.observability.tracing import get_langfuse_client
-from app.core.config import LANGFUSE_ENABLED
+from app.core.config import LANGFUSE_ENABLED, LANGFUSE_BASE_URL
 from app.settings import TEMPORAL_ADDRESS
 
 
@@ -72,10 +74,10 @@ def health_check(request):
                 # This is a lightweight check that doesn't create traces
                 try:
                     # Check if client has the necessary attributes
-                    if hasattr(langfuse_client, 'api'):
+                    if hasattr(langfuse_client, "api"):
                         services["langfuse"] = {
                             "status": "healthy",
-                            "message": "Langfuse connection successful"
+                            "message": "Langfuse client initialized"
                         }
                     else:
                         services["langfuse"] = {
@@ -88,10 +90,25 @@ def health_check(request):
                         "message": f"Langfuse API error: {str(api_error)}"
                     }
             else:
-                services["langfuse"] = {
-                    "status": "degraded",
-                    "message": "Langfuse enabled but client not available (check configuration)"
-                }
+                parsed_url = urlparse(LANGFUSE_BASE_URL)
+                host = parsed_url.hostname or LANGFUSE_BASE_URL
+                port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                result = sock.connect_ex((host, port))
+                sock.close()
+
+                if result == 0:
+                    services["langfuse"] = {
+                        "status": "healthy",
+                        "message": f"Langfuse reachable at {host}:{port}"
+                    }
+                else:
+                    services["langfuse"] = {
+                        "status": "unhealthy",
+                        "message": f"Langfuse not reachable at {host}:{port}"
+                    }
         except Exception as e:
             services["langfuse"] = {
                 "status": "unhealthy",
@@ -133,9 +150,6 @@ def health_check(request):
     # Check Temporal (optional, won't fail if not configured)
     if TEMPORAL_ADDRESS:
         try:
-            import socket
-            from urllib.parse import urlparse
-            
             # Parse Temporal address (e.g., "temporal:7233" or "localhost:7233")
             # Handle both with and without protocol
             address = TEMPORAL_ADDRESS.replace('http://', '').replace('https://', '')

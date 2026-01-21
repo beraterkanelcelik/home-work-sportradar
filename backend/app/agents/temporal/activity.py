@@ -6,11 +6,15 @@ import json
 import os
 import asyncio
 import time
+import contextlib
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 from pydantic import BaseModel, validator
 from typing import Dict, Any, Optional
-from app.agents.runner import AgentRunner
+from app.agents.api_key_context import APIKeyContext
+from app.agents.functional.models import AgentRequest
+from app.agents.functional.workflow import ai_agent_workflow_events
+from langgraph.types import Command
 from app.core.redis import get_redis_client, RobustRedisPublisher, get_message_buffer
 from app.core.logging import get_logger
 from app.settings import REDIS_PUBLISH_CONCURRENCY
@@ -142,8 +146,10 @@ async def _publish_event_async(
         logger.error(f"[REDIS_PUBLISH] Error in background publish: {e}", exc_info=True)
 
 
-@activity.defn
-async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
+async def _run_chat_activity_async(
+    input_data: Any,
+    api_key_ctx: Optional[APIKeyContext] = None,
+) -> Dict[str, Any]:
     """
     Activity with proper error handling and heartbeating.
 
@@ -195,23 +201,12 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
         tenant_id = str(tenant_id)
         channel = f"chat:{tenant_id}:{chat_id}"
 
-        # Heartbeat tracking
-        last_heartbeat = time.time()
-        HEARTBEAT_INTERVAL = 10
-
-        async def maybe_heartbeat():
-            nonlocal last_heartbeat
-            now = time.time()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                activity.heartbeat(f"Processing chat {chat_id}")
-                last_heartbeat = now
-
         # Send initial heartbeat
         activity.heartbeat({"status": "initialized", "chat_id": chat_id})
 
-        # Fetch API keys asynchronously (safe for async context)
-        from app.agents.api_key_context import APIKeyContext
-        api_key_ctx = await APIKeyContext.from_user_async(user_id)
+        # Fetch API keys
+        if api_key_ctx is None:
+            api_key_ctx = APIKeyContext.from_user(user_id)
 
         # Create root Langfuse trace if enabled (for activity-level tracing)
         trace_id = None
@@ -267,29 +262,28 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                 f"[HITL] [ACTIVITY_RESUME] Activity re-run with resume_payload: session={chat_id}"
             )
 
-        # Create AgentRunner - this handles request building, trace context, etc.
-        # If resume_payload is provided, runner will use Command(resume=...) instead of AgentRequest
-        runner = AgentRunner(
-            user_id=state.get("user_id"),
-            chat_session_id=chat_id,
-            message=state.get("message", ""),
-            plan_steps=state.get("plan_steps"),
-            flow=state.get("flow", "main"),
-            trace_id=trace_id,  # Pass activity-generated trace_id to runner
-            org_slug=state.get("org_slug"),
-            org_roles=state.get("org_roles", []),
-            app_roles=state.get("app_roles", []),
-            resume_payload=resume_payload,  # Pass resume_payload for interrupt resume
-            run_id=state.get("run_id"),  # Correlation ID for /run polling
-            parent_message_id=state.get(
-                "parent_message_id"
-            ),  # Parent message ID for correlation
-            api_key_ctx=api_key_ctx,  # Pass pre-created async context
-        )
-
+        # Build AgentRequest or Command for resume
         if resume_payload:
+            request = Command(resume=resume_payload)
             logger.info(
-                f"[HITL] Injected resume_payload into AgentRunner: session={chat_id}"
+                f"[HITL] Injected resume_payload into workflow: session={chat_id}"
+            )
+        else:
+            request = AgentRequest(
+                query=state.get("message", ""),
+                session_id=chat_id,
+                user_id=user_id,
+                org_slug=state.get("org_slug"),
+                org_roles=state.get("org_roles", []),
+                app_roles=state.get("app_roles", []),
+                flow=state.get("flow", "main"),
+                plan_steps=state.get("plan_steps"),
+                trace_id=trace_id,
+                run_id=state.get("run_id"),
+                parent_message_id=state.get("parent_message_id"),
+                openai_api_key=api_key_ctx.openai_api_key,
+                langfuse_public_key=api_key_ctx.langfuse_public_key,
+                langfuse_secret_key=api_key_ctx.langfuse_secret_key,
             )
 
         # Streaming mode: use .stream() and publish to Redis
@@ -317,158 +311,184 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             publisher = None
             message_buffer = None
 
-        # Heartbeat tracking
-        last_heartbeat = time.time()
+        event_count = [0]  # Use list for mutable closure
+        final_response = None
+        interrupt_data = None  # Track interrupt data for resume
+        interrupt_output = None
+        message_id = None
+
         HEARTBEAT_INTERVAL = 10
 
-        async def maybe_heartbeat():
-            nonlocal last_heartbeat
-            now = time.time()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                activity.heartbeat(f"Processing chat {chat_id}")
-                last_heartbeat = now
-
-        final_response = None
-        event_count = [0]  # Use list for mutable closure
-        interrupt_data = None  # Track interrupt data for resume
-        message_id = None
+        async def heartbeat_loop():
+            try:
+                while True:
+                    activity.heartbeat(
+                        {
+                            "status": "running",
+                            "chat_id": chat_id,
+                            "event_count": event_count[0],
+                        }
+                    )
+                    await asyncio.sleep(HEARTBEAT_INTERVAL)
+            except asyncio.CancelledError:
+                return
 
         # Semaphore for backpressure: cap concurrent publish operations
         publish_semaphore = asyncio.Semaphore(REDIS_PUBLISH_CONCURRENCY)
 
-        # Run workflow using AgentRunner.stream()
+        heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+        # Run workflow using ai_agent_workflow_events()
         # Publish to Redis directly in the loop (non-blocking) to ensure tasks execute properly
-        async for event in runner.stream():
-            await maybe_heartbeat()
+        try:
+            accumulated_content = ""
+            tokens_used = 0
+            async for event in ai_agent_workflow_events(
+                request,
+                session_id=chat_id,
+                user_id=user_id,
+                trace_id=trace_id,
+            ):
+                # Check for cancellation
+                if activity.is_cancelled():
+                    raise ApplicationError("Activity cancelled", non_retryable=True)
 
-            # Check for cancellation
-            if activity.is_cancelled():
-                raise ApplicationError("Activity cancelled", non_retryable=True)
+                event_type = event.get("type", "unknown")
+                if event_type == "token":
+                    accumulated_content += event.get("value", "")
+                event_count[0] += 1
 
-            event_type = event.get("type", "unknown")
-            event_count[0] += 1
-
-            # Publish event to Redis (fire-and-forget, non-blocking with backpressure)
-            if publisher:
-                # DESIGN NOTE: Backpressure strategy
-                # Current approach: semaphore throttles ALL events (including tokens)
-                # - When Redis is slow, this slows down token consumption, which can slow upstream LLM streaming
-                # - This protects the system from unbounded memory growth (current priority)
-                # Alternative approach (for "best-effort tokens"):
-                # - Drop token events when semaphore saturated, but always publish interrupt/final/error
-                # - This keeps LLM streaming fast but may drop some tokens under load
-                # Current choice: throttle all events to protect system stability
-
-                # Acquire semaphore before creating task (prevents unbounded in-flight tasks)
-                current_count = event_count[0]
-                try:
-                    await publish_semaphore.acquire()
-                    task = asyncio.create_task(
-                        _publish_event_async(
-                            publisher, channel, event, current_count, message_buffer
-                        )
-                    )
-                    # Add done callback to release semaphore and log errors
-                    # Semaphore is released in callback, not here, to ensure it's always released
-                    task.add_done_callback(
-                        lambda t,
-                        et=event_type,
-                        ec=current_count,
-                        sem=publish_semaphore: _handle_publish_task_done(t, et, ec, sem)
-                    )
-                    # Note: No need for asyncio.sleep(0) - semaphore already throttles and tasks will execute
-                except Exception as e:
-                    # If task creation fails, release semaphore
-                    try:
-                        publish_semaphore.release()
-                    except Exception:
-                        pass
-                    logger.error(
-                        f"[REDIS_PUBLISH] Failed to create publish task for {event_type} (event_count={current_count}): {e}",
-                        exc_info=True,
-                    )
-
-            # Check for interrupt (LangGraph native interrupt pattern)
-            if event.get("type") == "interrupt":
-                interrupt_data = event.get("data") or event.get("interrupt")
-                logger.info(
-                    f"[HITL] [INTERRUPT] Workflow interrupted for chat_id={chat_id}, interrupt_data={interrupt_data}"
-                )
-                # Publish interrupt event to Redis for frontend
+                # Publish event to Redis (fire-and-forget, non-blocking with backpressure)
                 if publisher:
-                    asyncio.create_task(
-                        _publish_event_async(
-                            publisher, channel, event, event_count[0], message_buffer
-                        )
-                    )
-                return ChatActivityOutput(
-                    status="interrupted",
-                    interrupt_data=interrupt_data,
-                    event_count=event_count[0],
-                ).dict()
+                    # DESIGN NOTE: Backpressure strategy
+                    # Current approach: semaphore throttles ALL events (including tokens)
+                    # - When Redis is slow, this slows down token consumption, which can slow upstream LLM streaming
+                    # - This protects the system from unbounded memory growth (current priority)
+                    # Alternative approach (for "best-effort tokens"):
+                    # - Drop token events when semaphore saturated, but always publish interrupt/final/error
+                    # - This keeps LLM streaming fast but may drop some tokens under load
+                    # Current choice: throttle all events to protect system stability
 
-            # Capture final response (for message_saved event and workflow buffer)
-            if event.get("type") == "final":
-                final_response = event.get("response")
-
-                # Add assistant message to workflow buffer instead of immediate DB write
-                # This optimizes DB operations by batching writes on workflow close
-                if final_response:
+                    # Acquire semaphore before creating task (prevents unbounded in-flight tasks)
+                    current_count = event_count[0]
                     try:
-                        from app.agents.temporal.workflow_manager import get_workflow_id
-                        from app.core.temporal import get_temporal_client
-
-                        # Get workflow handle to signal
-                        client = await get_temporal_client()
-                        workflow_id = get_workflow_id(user_id, chat_id)
-                        workflow_handle = client.get_workflow_handle(workflow_id)
-
-                        # Extract message data from response
-                        content = (
-                            final_response.reply
-                            if hasattr(final_response, "reply")
-                            else str(final_response)
-                        )
-                        metadata = {}
-                        tokens_used = 0
-
-                        if hasattr(final_response, "token_usage"):
-                            tokens_used = final_response.token_usage.get(
-                                "total_tokens", 0
+                        await publish_semaphore.acquire()
+                        task = asyncio.create_task(
+                            _publish_event_async(
+                                publisher, channel, event, current_count, message_buffer
                             )
-                            metadata.update(
-                                {
-                                    "input_tokens": final_response.token_usage.get(
-                                        "input_tokens", 0
-                                    ),
-                                    "output_tokens": final_response.token_usage.get(
-                                        "output_tokens", 0
-                                    ),
-                                    "cached_tokens": final_response.token_usage.get(
-                                        "cached_tokens", 0
-                                    ),
-                                }
-                            )
-
-                        if hasattr(final_response, "agent_name"):
-                            metadata["agent_name"] = final_response.agent_name
-
-                        if hasattr(final_response, "tool_calls"):
-                            metadata["tool_calls"] = final_response.tool_calls
-
-                        # Signal workflow to add message to buffer
-                        await workflow_handle.signal(
-                            "add_message_to_buffer",
-                            args=("assistant", content, metadata, tokens_used),
                         )
-                        logger.info(
-                            f"[WORKFLOW_BUFFER] Added assistant message to workflow buffer for session {chat_id}"
+                        # Add done callback to release semaphore and log errors
+                        # Semaphore is released in callback, not here, to ensure it's always released
+                        task.add_done_callback(
+                            lambda t,
+                            et=event_type,
+                            ec=current_count,
+                            sem=publish_semaphore: _handle_publish_task_done(t, et, ec, sem)
                         )
+                        # Note: No need for asyncio.sleep(0) - semaphore already throttles and tasks will execute
                     except Exception as e:
-                        logger.warning(
-                            f"[WORKFLOW_BUFFER] Failed to add message to workflow buffer: {e}, will fall back to DB write"
+                        # If task creation fails, release semaphore
+                        try:
+                            publish_semaphore.release()
+                        except Exception:
+                            pass
+                        logger.error(
+                            f"[REDIS_PUBLISH] Failed to create publish task for {event_type} (event_count={current_count}): {e}",
+                            exc_info=True,
                         )
-                        # Continue - save_message_task will handle DB write as fallback
+
+                # Check for interrupt (LangGraph native interrupt pattern)
+                if event.get("type") == "interrupt":
+                    interrupt_data = event.get("data") or event.get("interrupt")
+                    logger.info(
+                        f"[HITL] [INTERRUPT] Workflow interrupted for chat_id={chat_id}, interrupt_data={interrupt_data}"
+                    )
+                    # Publish interrupt event to Redis for frontend
+                    if publisher:
+                        asyncio.create_task(
+                            _publish_event_async(
+                                publisher, channel, event, event_count[0], message_buffer
+                            )
+                        )
+                    interrupt_output = ChatActivityOutput(
+                        status="interrupted",
+                        interrupt_data=interrupt_data,
+                        event_count=event_count[0],
+                    ).dict()
+                    break
+
+                # Capture final response (for message_saved event and workflow buffer)
+                if event.get("type") == "final":
+                    final_response = event.get("response")
+                    if final_response and hasattr(final_response, "token_usage"):
+                        tokens_used = final_response.token_usage.get("total_tokens", 0)
+
+                    # Add assistant message to workflow buffer instead of immediate DB write
+                    # This optimizes DB operations by batching writes on workflow close
+                    if final_response:
+                        try:
+                            from app.agents.temporal.workflow_manager import get_workflow_id
+                            from app.core.temporal import get_temporal_client
+
+                            # Get workflow handle to signal
+                            client = await get_temporal_client()
+                            workflow_id = get_workflow_id(user_id, chat_id)
+                            workflow_handle = client.get_workflow_handle(workflow_id)
+
+                            # Extract message data from response
+                            content = (
+                                final_response.reply
+                                if hasattr(final_response, "reply")
+                                else str(final_response)
+                            )
+                            metadata = {}
+                            tokens_used = 0
+
+                            if hasattr(final_response, "token_usage"):
+                                tokens_used = final_response.token_usage.get(
+                                    "total_tokens", 0
+                                )
+                                metadata.update(
+                                    {
+                                        "input_tokens": final_response.token_usage.get(
+                                            "input_tokens", 0
+                                        ),
+                                        "output_tokens": final_response.token_usage.get(
+                                            "output_tokens", 0
+                                        ),
+                                        "cached_tokens": final_response.token_usage.get(
+                                            "cached_tokens", 0
+                                        ),
+                                    }
+                                )
+
+                            if hasattr(final_response, "agent_name"):
+                                metadata["agent_name"] = final_response.agent_name
+
+                            if hasattr(final_response, "tool_calls"):
+                                metadata["tool_calls"] = final_response.tool_calls
+
+                            # Signal workflow to add message to buffer
+                            await workflow_handle.signal(
+                                "add_message_to_buffer",
+                                args=("assistant", content, metadata, tokens_used),
+                            )
+                            logger.info(
+                                f"[WORKFLOW_BUFFER] Added assistant message to workflow buffer for session {chat_id}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[WORKFLOW_BUFFER] Failed to add message to workflow buffer: {e}, will fall back to DB write"
+                            )
+                            # Continue - save_message_task will handle DB write as fallback
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+        if interrupt_output is not None:
+            return interrupt_output
 
         # Emit message_saved event for assistant message after final event
         # Note: Message is now in workflow buffer, will be persisted on workflow close
@@ -504,6 +524,25 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
                     f"Failed to emit message_saved event for assistant message: {e}",
                     exc_info=True,
                 )
+
+        if final_response and publisher:
+            done_event = {
+                "type": "done",
+                "data": {
+                    "final_text": accumulated_content,
+                    "tokens_used": tokens_used,
+                    "trace_id": trace_id,
+                },
+            }
+            asyncio.create_task(
+                _publish_event_async(
+                    publisher,
+                    channel,
+                    done_event,
+                    event_count[0] + 1,
+                    message_buffer,
+                )
+            )
 
         # End Langfuse trace if created and flush traces
         if langfuse_trace:
@@ -555,6 +594,33 @@ async def run_chat_activity(input_data: Any) -> Dict[str, Any]:
             type="CHAT_ACTIVITY_ERROR",
             non_retryable=False,  # Allow retry for transient errors
         )
+
+
+@activity.defn
+def run_chat_activity(input_data: Any) -> Dict[str, Any]:
+    """
+    Synchronous wrapper to run async chat activity in thread pool.
+
+    Running the async activity in a dedicated event loop keeps the worker
+    event loop free to process workflow tasks, preventing workflow task timeouts
+    during long LLM calls.
+    """
+    api_key_ctx = None
+    try:
+        user_id = None
+        if isinstance(input_data, dict):
+            user_id = (input_data.get("state") or {}).get("user_id")
+        elif isinstance(input_data, ChatActivityInput):
+            user_id = input_data.state.get("user_id")
+
+        if user_id is not None:
+            api_key_ctx = APIKeyContext.from_user(user_id)
+        else:
+            api_key_ctx = APIKeyContext.from_env()
+    except Exception as e:
+        logger.warning(f"Failed to load API keys for activity: {e}")
+
+    return asyncio.run(_run_chat_activity_async(input_data, api_key_ctx=api_key_ctx))
 
 
 @activity.defn

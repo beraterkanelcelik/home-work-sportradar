@@ -41,6 +41,9 @@ interface ApiKeyStatus {
   langfuse_public_key: { is_set: boolean; source: string }
   langfuse_secret_key: { is_set: boolean; source: string }
   langfuse_keys_complete: boolean
+  api_keys_complete: boolean
+  api_keys_validated: boolean
+  api_keys_validated_at: string | null
 }
 
 
@@ -60,6 +63,20 @@ export default function ProfilePage() {
   const [langfuseSecretKey, setLangfuseSecretKey] = useState('')
   const [savingKeys, setSavingKeys] = useState(false)
   const [clearingKeys, setClearingKeys] = useState(false)
+
+  const keysComplete = apiKeyStatus?.api_keys_complete
+  const keysValidated = apiKeyStatus?.api_keys_validated
+  const keysValidatedAt = apiKeyStatus?.api_keys_validated_at
+  const apiKeyStatusLabel = keysValidated
+    ? 'Keys verified'
+    : keysComplete
+      ? 'Validation pending'
+      : 'Keys not set'
+  const apiKeyStatusDot = keysValidated
+    ? 'bg-emerald-500'
+    : keysComplete
+      ? 'bg-amber-500'
+      : 'bg-muted-foreground/40'
 
   // Password change form
   const [oldPassword, setOldPassword] = useState('')
@@ -107,17 +124,19 @@ export default function ProfilePage() {
   }
 
   const handleSaveApiKeys = async () => {
-    if ((langfusePublicKey && !langfuseSecretKey) || (!langfusePublicKey && langfuseSecretKey)) {
-      toast.error('Both Langfuse keys must be provided together')
+    const hasAnyKeyInput = Boolean(openaiKey || langfusePublicKey || langfuseSecretKey)
+    const hasAllKeysInput = Boolean(openaiKey && langfusePublicKey && langfuseSecretKey)
+    if (hasAnyKeyInput && !hasAllKeysInput) {
+      toast.error('OpenAI key and both Langfuse keys must be provided together')
       return
     }
 
     setSavingKeys(true)
     try {
       const response = await userAPI.updateApiKeys({
-        openai_api_key: openaiKey || '',
-        langfuse_public_key: langfusePublicKey || '',
-        langfuse_secret_key: langfuseSecretKey || '',
+        openai_api_key: openaiKey || null,
+        langfuse_public_key: langfusePublicKey || null,
+        langfuse_secret_key: langfuseSecretKey || null,
       })
       setApiKeyStatus(response.data.status)
       setOpenaiKey('')
@@ -326,7 +345,14 @@ export default function ProfilePage() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
           <div>
             <h2 className="text-lg sm:text-xl font-semibold">API Keys</h2>
-            <p className="text-sm text-muted-foreground">Add your own keys for OpenAI or Langfuse. Stored encrypted.</p>
+            <p className="text-sm text-muted-foreground">Add your OpenAI and Langfuse keys together. Stored encrypted.</p>
+            <div className="text-xs text-muted-foreground flex items-center gap-2 mt-2">
+              <span className={`h-2 w-2 rounded-full ${apiKeyStatusDot}`} />
+              <span>{apiKeyStatusLabel}</span>
+              {keysValidated && keysValidatedAt ? (
+                <span>· Verified {new Date(keysValidatedAt).toLocaleString()}</span>
+              ) : null}
+            </div>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={handleClearApiKeys} disabled={clearingKeys} className="rounded-lg">
@@ -388,7 +414,7 @@ export default function ProfilePage() {
                 autoComplete="off"
                 className="w-full px-4 py-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background"
               />
-            <p className="text-xs text-muted-foreground mt-1">Provide both Langfuse keys together.</p>
+            <p className="text-xs text-muted-foreground mt-1">Provide all three keys together to validate tracing.</p>
           </div>
         </div>
       </div>
