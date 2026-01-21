@@ -213,8 +213,8 @@ RAG_TOP_N = int(os.getenv('RAG_TOP_N', '8'))  # Final chunks after reranking
 RAG_MAX_CONTEXT_TOKENS = int(os.getenv('RAG_MAX_CONTEXT_TOKENS', '4000'))  # Max tokens in context
 
 # PDF Extraction Configuration
-PDF_EXTRACTOR_PREFERENCE = os.getenv('PDF_EXTRACTOR_PREFERENCE', 'pdfplumber')  # pdfplumber, pymupdf, pypdf
-PDF_OCR_ENABLED = os.getenv('PDF_OCR_ENABLED', 'True').lower() == 'true'  # Enable OCR for scanned PDFs
+PDF_EXTRACTOR_PREFERENCE = os.getenv('PDF_EXTRACTOR_PREFERENCE', 'pypdf')  # pypdf, pdfplumber, pymupdf, ocr
+PDF_OCR_ENABLED = os.getenv('PDF_OCR_ENABLED', 'False').lower() == 'true'  # Enable OCR for scanned PDFs
 PDF_OCR_MIN_TEXT_THRESHOLD = int(os.getenv('PDF_OCR_MIN_TEXT_THRESHOLD', '50'))  # Min chars per page to skip OCR
 
 # Chunking Configuration

@@ -275,97 +275,42 @@ class OCRPDFExtractor(TextExtractor):
 
 class SmartPDFExtractor(TextExtractor):
     """
-    Smart PDF extractor that tries multiple backends with fallback chain.
-    Auto-detects scanned PDFs and uses OCR if needed.
+    PDF extractor that uses a single configured backend.
     """
     
     @staticmethod
     def extract(file_path: Path, mime_type: str) -> Tuple[str, Dict[int, Dict[str, int]], Dict[str, Any]]:
         """
-        Extract text from PDF using best available method with fallbacks.
-        
-        Strategy:
-        1. Try preferred extractor (from settings)
-        2. Fallback to other extractors if preferred fails
-        3. Auto-detect scanned PDFs (low text) and use OCR
-        4. Return result with metadata about method used
+        Extract text from PDF using the configured backend only.
         """
-        preferred = getattr(settings, 'PDF_EXTRACTOR_PREFERENCE', 'pdfplumber')
-        ocr_enabled = getattr(settings, 'PDF_OCR_ENABLED', True)
-        ocr_threshold = getattr(settings, 'PDF_OCR_MIN_TEXT_THRESHOLD', 50)
-        
-        # Define extractor chain based on preference
-        extractors = []
-        if preferred == 'pdfplumber':
-            extractors = [
-                ('pdfplumber', PDFPlumberExtractor),
-                ('pymupdf', PyMuPDFExtractor),
-                ('pypdf', PyPDFExtractor),
-            ]
-        elif preferred == 'pymupdf':
-            extractors = [
-                ('pymupdf', PyMuPDFExtractor),
-                ('pdfplumber', PDFPlumberExtractor),
-                ('pypdf', PyPDFExtractor),
-            ]
-        else:  # pypdf
-            extractors = [
-                ('pypdf', PyPDFExtractor),
-                ('pdfplumber', PDFPlumberExtractor),
-                ('pymupdf', PyMuPDFExtractor),
-            ]
-        
-        # Try each extractor
-        last_error = None
-        for extractor_name, extractor_class in extractors:
-            try:
-                logger.debug(f"Trying PDF extraction with {extractor_name}")
-                text, page_map, metadata = extractor_class.extract(file_path, mime_type)
-                
-                # Check if extraction was successful (got some text)
-                total_text_length = len(text)
-                num_pages = metadata.get('num_pages', 1)
-                avg_chars_per_page = total_text_length / num_pages if num_pages > 0 else 0
-                
-                # If very little text extracted, might be scanned PDF
-                if ocr_enabled and avg_chars_per_page < ocr_threshold and total_text_length < ocr_threshold * num_pages:
-                    logger.info(f"Low text extraction ({avg_chars_per_page:.0f} chars/page), trying OCR")
-                    try:
-                        text, page_map, metadata = OCRPDFExtractor.extract(file_path, mime_type)
-                        metadata['extraction_method'] = 'ocr_fallback'
-                        logger.info("Successfully extracted text using OCR")
-                        return text, page_map, metadata
-                    except Exception as ocr_error:
-                        logger.warning(f"OCR extraction failed: {ocr_error}, using {extractor_name} result")
-                        # Use the low-quality extraction as fallback
-                
-                logger.info(f"Successfully extracted text using {extractor_name}")
-                return text, page_map, metadata
-                
-            except ImportError as e:
-                logger.debug(f"{extractor_name} not available: {e}")
-                last_error = e
-                continue
-            except Exception as e:
-                logger.warning(f"{extractor_name} extraction failed: {e}")
-                last_error = e
-                continue
-        
-        # If all extractors failed, try OCR as last resort
-        if ocr_enabled:
-            try:
-                logger.info("All standard extractors failed, trying OCR as last resort")
-                text, page_map, metadata = OCRPDFExtractor.extract(file_path, mime_type)
-                metadata['extraction_method'] = 'ocr_last_resort'
-                return text, page_map, metadata
-            except Exception as ocr_error:
-                logger.error(f"OCR extraction also failed: {ocr_error}")
-        
-        # If everything failed, raise error
-        raise RuntimeError(
-            f"All PDF extraction methods failed. Last error: {last_error}. "
-            "Make sure at least one PDF extraction library is installed."
-        )
+        preferred = getattr(settings, 'PDF_EXTRACTOR_PREFERENCE', 'pypdf')
+        extractor_map = {
+            'pdfplumber': PDFPlumberExtractor,
+            'pymupdf': PyMuPDFExtractor,
+            'pypdf': PyPDFExtractor,
+            'ocr': OCRPDFExtractor,
+        }
+
+        extractor_name = preferred if preferred in extractor_map else 'pypdf'
+        if extractor_name != preferred:
+            logger.warning(
+                "Unknown PDF_EXTRACTOR_PREFERENCE '%s', using '%s'",
+                preferred,
+                extractor_name,
+            )
+
+        extractor_class = extractor_map[extractor_name]
+
+        try:
+            logger.debug(f"Extracting PDF with {extractor_name}")
+            text, page_map, metadata = extractor_class.extract(file_path, mime_type)
+            logger.info(f"Successfully extracted text using {extractor_name}")
+            return text, page_map, metadata
+        except Exception as exc:
+            logger.warning(f"{extractor_name} extraction failed: {exc}")
+            raise RuntimeError(
+                f"PDF extraction failed using {extractor_name}. Error: {exc}"
+            ) from exc
 
 
 class PlainTextExtractor(TextExtractor):
