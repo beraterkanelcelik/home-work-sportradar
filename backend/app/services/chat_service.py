@@ -357,7 +357,7 @@ def get_session_stats(session_id: int) -> Dict[str, Any]:
     from app.services.langfuse_metrics import get_session_metrics_from_langfuse
     
     # 1. Get session from database (for metadata)
-    session = ChatSession.objects.get(id=session_id)
+    session = ChatSession.objects.select_related("user").get(id=session_id)
     
     # 2. Get message counts from database (simpler, more reliable)
     messages = Message.objects.filter(session_id=session_id)
@@ -366,7 +366,17 @@ def get_session_stats(session_id: int) -> Dict[str, Any]:
     total_messages = messages.count()
     
     # 3. Query Langfuse Metrics API
-    langfuse_metrics = get_session_metrics_from_langfuse(session_id)
+    public_key = None
+    secret_key = None
+    if session.user and session.user.has_custom_langfuse_keys():
+        public_key = session.user.langfuse_public_key
+        secret_key = session.user.langfuse_secret_key
+
+    langfuse_metrics = get_session_metrics_from_langfuse(
+        session_id,
+        public_key=public_key,
+        secret_key=secret_key,
+    )
     if not langfuse_metrics:
         raise ValueError("Langfuse metrics unavailable. Ensure Langfuse is enabled and session has traces.")
     

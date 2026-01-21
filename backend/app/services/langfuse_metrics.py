@@ -6,9 +6,13 @@ for token usage, costs, and agent/tool analytics by session_id.
 """
 
 import json
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, cast
 from datetime import datetime, timezone
-from app.observability.tracing import LANGFUSE_ENABLED, get_langfuse_client
+from app.observability.tracing import (
+    LANGFUSE_ENABLED,
+    get_langfuse_client,
+    get_langfuse_client_for_user,
+)
 
 from app.core.logging import get_logger
 
@@ -19,6 +23,14 @@ logger = get_logger(__name__)
 # Helper Functions (Private)
 # ============================================================================
 
+
+def _resolve_langfuse_client(
+    public_key: Optional[str],
+    secret_key: Optional[str],
+) -> Optional[Any]:
+    if public_key and secret_key:
+        return get_langfuse_client_for_user(public_key, secret_key)
+    return get_langfuse_client()
 
 def _normalize_api_response(response: Any) -> List[Any]:
     """
@@ -194,7 +206,7 @@ def _extract_cost_data(
     Returns:
         Dictionary with input_cost, output_cost, total_cost
     """
-    costs = {
+    costs: Dict[str, Optional[float]] = {
         "input_cost": None,
         "output_cost": None,
         "total_cost": None,
@@ -226,7 +238,7 @@ def _extract_cost_data(
         if not costs["total_cost"]:
             costs["total_cost"] = usage.get("total_cost") or usage.get("totalCost")
 
-    return costs
+    return cast(Dict[str, Optional[float]], costs)
 
 
 def _extract_observation_fields(obs: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
@@ -392,6 +404,8 @@ def build_metrics_query(session_id: int, from_timestamp: datetime) -> Dict[str, 
 
     Args:
         session_id: Chat session ID
+        public_key: Optional Langfuse public key (per-user)
+        secret_key: Optional Langfuse secret key (per-user)
         from_timestamp: Session creation timestamp
 
     Returns:
@@ -655,7 +669,11 @@ def aggregate_agent_tool_usage(
     }
 
 
-def get_session_metrics_from_langfuse(session_id: int) -> Optional[Dict[str, Any]]:
+def get_session_metrics_from_langfuse(
+    session_id: int,
+    public_key: Optional[str] = None,
+    secret_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Query Langfuse Metrics API for session statistics.
 
@@ -676,20 +694,25 @@ def get_session_metrics_from_langfuse(session_id: int) -> Optional[Dict[str, Any
         return None
 
     try:
-        from app.observability.tracing import get_langfuse_client
-
-        langfuse = get_langfuse_client()
-        if not langfuse:
-            logger.warning("Langfuse client unavailable")
-            return None
-
-        # Get session from database for time range
+        # Get session from database for time range and user keys
         from app.db.models.session import ChatSession
 
         try:
-            session = ChatSession.objects.get(id=session_id)
+            session = ChatSession.objects.select_related("user").get(id=session_id)
         except ChatSession.DoesNotExist:
             logger.error(f"Session {session_id} not found")
+            return None
+
+        if not public_key or not secret_key:
+            user = getattr(session, "user", None)
+            if user and getattr(user, "has_custom_langfuse_keys", None):
+                if user.has_custom_langfuse_keys():
+                    public_key = user.langfuse_public_key
+                    secret_key = user.langfuse_secret_key
+
+        langfuse = _resolve_langfuse_client(public_key, secret_key)
+        if not langfuse:
+            logger.warning("Langfuse client unavailable")
             return None
 
         # Query observations (needed for agent/tool usage and fallback metrics)
@@ -766,9 +789,21 @@ def get_user_metrics_from_langfuse(user_id: int) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        from app.observability.tracing import get_langfuse_client
+        from app.account.models import User
 
-        langfuse = get_langfuse_client()
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            logger.warning(f"User {user_id} not found for Langfuse metrics")
+            return None
+
+        public_key = None
+        secret_key = None
+        if user.has_custom_langfuse_keys():
+            public_key = user.langfuse_public_key
+            secret_key = user.langfuse_secret_key
+
+        langfuse = _resolve_langfuse_client(public_key, secret_key)
         if not langfuse:
             logger.warning("Langfuse client unavailable")
             return None

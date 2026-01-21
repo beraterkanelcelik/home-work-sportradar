@@ -3,9 +3,13 @@
 Script to initialize MinIO bucket for Langfuse
 """
 
+import os
 import subprocess
 import sys
 import time
+
+from minio import Minio
+from minio.error import S3Error
 
 
 def wait_for_minio():
@@ -28,32 +32,32 @@ def wait_for_minio():
 
 def create_bucket():
     """Create langfuse-events bucket if it doesn't exist"""
+    bucket_name = os.getenv("MINIO_BUCKET", "langfuse-events")
+    endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+    access_key = os.getenv("MINIO_ROOT_USER", "minio")
+    secret_key = os.getenv("MINIO_ROOT_PASSWORD", "minio123")
+
     try:
-        # Try to create bucket using curl (simplified, may not work with auth)
-        result = subprocess.run(
-            [
-                "curl",
-                "-X",
-                "PUT",
-                "http://minio:9000/langfuse-events",
-                "-H",
-                "Authorization: AWS4-HMAC-SHA256 Credential=minio/minio",
-            ],
-            capture_output=True,
-            timeout=10,
+        client = Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=False,
         )
 
-        if result.returncode == 0:
-            print("Created langfuse-events bucket")
-        elif (
-            b"BucketAlreadyExists" in result.stderr
-            or b"BucketAlreadyOwnedByYou" in result.stderr
-        ):
-            print("langfuse-events bucket already exists")
+        if client.bucket_exists(bucket_name):
+            print(f"{bucket_name} bucket already exists")
+            return
+
+        client.make_bucket(bucket_name)
+        print(f"Created {bucket_name} bucket")
+    except S3Error as exc:
+        if exc.code in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
+            print(f"{bucket_name} bucket already exists")
         else:
-            print(f"Warning: Could not create bucket: {result.stderr.decode()}")
-    except Exception as e:
-        print(f"Warning: Could not create MinIO bucket: {e}")
+            print(f"Warning: Could not create bucket: {exc}")
+    except Exception as exc:
+        print(f"Warning: Could not create MinIO bucket: {exc}")
 
 
 if __name__ == "__main__":
