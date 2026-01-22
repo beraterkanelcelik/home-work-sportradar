@@ -30,11 +30,17 @@ interface TokenStats {
 
 interface ScoutReport {
   id: string
-  player_name: string
-  position: string
-  team: string
+  player: {
+    id: string
+    display_name: string
+    sport: string
+    positions?: string[]
+    teams?: string[]
+  }
+  coverage?: {
+    confidence: 'low' | 'med' | 'high'
+  }
   created_at: string
-  status: string
 }
 
 export default function DashboardPage() {
@@ -195,18 +201,18 @@ export default function DashboardPage() {
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <h3 className="font-medium">{report.player_name}</h3>
+                        <h3 className="font-medium">{report.player.display_name}</h3>
                         <p className="text-sm text-muted-foreground">
-                          {report.position} {report.team && `• ${report.team}`}
+                          {report.player.positions?.join(', ') || '—'} {report.player.teams?.length ? `• ${report.player.teams.join(', ')}` : ''}
                         </p>
                       </div>
                       <div className="text-right">
                         <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                          report.status === 'completed' ? 'bg-green-500/10 text-green-600' :
-                          report.status === 'pending' ? 'bg-yellow-500/10 text-yellow-600' :
-                          'bg-muted text-muted-foreground'
+                          report.coverage?.confidence === 'high' ? 'bg-green-500/10 text-green-600' :
+                          report.coverage?.confidence === 'med' ? 'bg-yellow-500/10 text-yellow-600' :
+                          'bg-red-500/10 text-red-600'
                         }`}>
-                          {report.status}
+                          {report.coverage?.confidence || 'low'} confidence
                         </span>
                         <p className="text-xs text-muted-foreground mt-1">
                           {new Date(report.created_at).toLocaleDateString()}
