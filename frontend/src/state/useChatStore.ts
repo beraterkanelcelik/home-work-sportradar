@@ -176,6 +176,8 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
           response_type: metadata.response_type,
           plan: metadata.plan,
           plan_progress: metadata.plan_progress,
+          player_preview: metadata.player_preview,
+          player_preview_status: metadata.player_preview_status,
           clarification: metadata.clarification,
           raw_tool_outputs: metadata.raw_tool_outputs,
           // Note: status is transient (only during streaming), not persisted

@@ -654,12 +654,22 @@ async def _run_chat_activity_async(
                 )
 
         if final_response and publisher:
+            # Include response data in done event so frontend gets the reply without needing to reload
+            response_data = {}
+            if hasattr(final_response, "reply"):
+                response_data["reply"] = final_response.reply
+            if hasattr(final_response, "type"):
+                response_data["type"] = final_response.type
+            if hasattr(final_response, "agent_name"):
+                response_data["agent_name"] = final_response.agent_name
+
             done_event = {
                 "type": "done",
                 "data": {
                     "final_text": accumulated_content,
                     "tokens_used": tokens_used,
                     "trace_id": trace_id,
+                    "response": response_data if response_data else None,
                 },
             }
             try:

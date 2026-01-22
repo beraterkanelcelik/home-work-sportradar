@@ -114,6 +114,123 @@ class WorkflowState:
     completed_steps: List[int] = field(default_factory=list)
 
 
+# =============================================================================
+# WORKFLOW STATE SERIALIZATION
+# =============================================================================
+
+
+def serialize_workflow_state(state: WorkflowState) -> Dict[str, Any]:
+    """
+    Serialize WorkflowState to a JSON-serializable dictionary.
+
+    This is used to persist workflow state to session.metadata so it survives
+    across HITL interrupts. Only serializes fields that are needed for resume.
+    """
+    return {
+        # Plan info
+        "plan": state.plan.model_dump() if state.plan else None,
+        # Execution context (accumulated during plan execution)
+        "all_chunks": [chunk.model_dump() for chunk in state.all_chunks],
+        "all_queries": state.all_queries,
+        "player_fields": state.player_fields.model_dump() if state.player_fields else None,
+        "raw_facts": state.raw_facts,
+        "coverage": state.coverage.model_dump() if state.coverage else None,
+        "report_draft": state.report_draft.model_dump() if state.report_draft else None,
+        "preview": state.preview.model_dump() if state.preview else None,
+        # Results
+        "player_record_id": state.player_record_id,
+        "report_id": state.report_id,
+        "saved": state.saved,
+        "answer_context": state.answer_context,
+        # Step tracking
+        "completed_steps": state.completed_steps,
+    }
+
+
+def deserialize_workflow_state(state: WorkflowState, data: Dict[str, Any]) -> None:
+    """
+    Restore WorkflowState fields from a serialized dictionary.
+
+    Modifies the state object in place to restore fields from persisted data.
+    Handles missing fields gracefully for backward compatibility.
+    """
+    if not data:
+        return
+
+    # Restore plan
+    if data.get("plan"):
+        try:
+            state.plan = ExecutionPlan.model_validate(data["plan"])
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore plan: {e}")
+
+    # Restore chunks
+    if data.get("all_chunks"):
+        try:
+            state.all_chunks = [
+                ChunkData.model_validate(chunk) for chunk in data["all_chunks"]
+            ]
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore all_chunks: {e}")
+
+    # Restore queries
+    if data.get("all_queries"):
+        state.all_queries = data["all_queries"]
+
+    # Restore player_fields
+    if data.get("player_fields"):
+        try:
+            state.player_fields = PlayerFields.model_validate(data["player_fields"])
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore player_fields: {e}")
+
+    # Restore raw_facts
+    if data.get("raw_facts"):
+        state.raw_facts = data["raw_facts"]
+
+    # Restore coverage
+    if data.get("coverage"):
+        try:
+            state.coverage = Coverage.model_validate(data["coverage"])
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore coverage: {e}")
+
+    # Restore report_draft
+    if data.get("report_draft"):
+        try:
+            state.report_draft = ScoutingReportDraft.model_validate(data["report_draft"])
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore report_draft: {e}")
+
+    # Restore preview
+    if data.get("preview"):
+        try:
+            state.preview = DbPayloadPreview.model_validate(data["preview"])
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to restore preview: {e}")
+
+    # Restore results
+    if data.get("player_record_id"):
+        state.player_record_id = data["player_record_id"]
+    if data.get("report_id"):
+        state.report_id = data["report_id"]
+    if data.get("saved"):
+        state.saved = data["saved"]
+    if data.get("answer_context"):
+        state.answer_context = data["answer_context"]
+
+    # Restore completed_steps
+    if data.get("completed_steps"):
+        state.completed_steps = data["completed_steps"]
+
+    logger.info(
+        f"[WORKFLOW] Restored state: plan={state.plan is not None}, "
+        f"chunks={len(state.all_chunks)}, player_fields={state.player_fields is not None}, "
+        f"report_draft={state.report_draft is not None}, preview={state.preview is not None}, "
+        f"completed_steps={state.completed_steps}"
+    )
+
+
 def check_user_has_documents(user_id: int) -> bool:
     """Check if user has any indexed documents for RAG."""
     try:
@@ -127,14 +244,16 @@ def check_user_has_documents(user_id: int) -> bool:
         return False
 
 
-def save_completed_steps_to_session(
-    session_id: int, completed_steps: List[int]
-) -> None:
+def save_workflow_state_to_session(session_id: int, state: WorkflowState) -> None:
     """
-    Save completed step indices to session metadata.
+    Save full WorkflowState to session metadata.
 
-    This persists the workflow progress across HITL interrupts.
-    Without this, resuming after Gate B would re-run all steps.
+    This persists the workflow state across HITL interrupts, including:
+    - completed_steps (which steps are done)
+    - all_chunks, player_fields, report_draft, preview (actual data)
+
+    Without this, resuming after Gate B would have empty state data
+    even though steps were marked as completed.
     """
     try:
         from app.db.models.session import ChatSession
@@ -142,53 +261,90 @@ def save_completed_steps_to_session(
         session = ChatSession.objects.get(id=session_id)
         if session.metadata is None:
             session.metadata = {}
-        session.metadata["completed_steps"] = completed_steps
+
+        # Serialize and store full workflow state
+        session.metadata["workflow_state"] = serialize_workflow_state(state)
         session.save(update_fields=["metadata"])
+
         logger.info(
-            f"[WORKFLOW] Saved completed_steps to session {session_id}: {completed_steps}"
+            f"[WORKFLOW] Saved workflow_state to session {session_id}: "
+            f"completed_steps={state.completed_steps}, "
+            f"chunks={len(state.all_chunks)}, "
+            f"has_preview={state.preview is not None}"
         )
     except Exception as e:
-        logger.warning(f"[WORKFLOW] Failed to save completed_steps: {e}")
+        logger.warning(f"[WORKFLOW] Failed to save workflow_state: {e}")
 
 
-def load_completed_steps_from_session(session_id: int) -> List[int]:
+def load_workflow_state_from_session(session_id: int, state: WorkflowState) -> bool:
     """
-    Load completed step indices from session metadata.
+    Load full WorkflowState from session metadata.
 
-    Returns empty list if no completed steps are stored.
+    Restores all workflow state fields including:
+    - completed_steps (which steps are done)
+    - all_chunks, player_fields, report_draft, preview (actual data)
+
+    Returns True if state was restored, False otherwise.
     """
     try:
         from app.db.models.session import ChatSession
 
         session = ChatSession.objects.get(id=session_id)
-        if session.metadata and "completed_steps" in session.metadata:
-            steps = session.metadata["completed_steps"]
+
+        # Try new workflow_state format first
+        if session.metadata and "workflow_state" in session.metadata:
+            stored_state = session.metadata["workflow_state"]
+            deserialize_workflow_state(state, stored_state)
             logger.info(
-                f"[WORKFLOW] Loaded completed_steps from session {session_id}: {steps}"
+                f"[WORKFLOW] Loaded workflow_state from session {session_id}: "
+                f"completed_steps={state.completed_steps}"
             )
-            return steps
-        return []
+            return True
+
+        # Backward compatibility: try old completed_steps format
+        if session.metadata and "completed_steps" in session.metadata:
+            state.completed_steps = session.metadata["completed_steps"]
+            logger.info(
+                f"[WORKFLOW] Loaded completed_steps (legacy) from session {session_id}: "
+                f"{state.completed_steps}"
+            )
+            return True
+
+        return False
     except Exception as e:
-        logger.warning(f"[WORKFLOW] Failed to load completed_steps: {e}")
-        return []
+        logger.warning(f"[WORKFLOW] Failed to load workflow_state: {e}")
+        return False
 
 
-def clear_completed_steps_from_session(session_id: int) -> None:
+def clear_workflow_state_from_session(session_id: int) -> None:
     """
-    Clear completed step indices from session metadata.
+    Clear workflow state from session metadata.
 
     Called when workflow completes successfully.
+    Removes both new workflow_state and legacy completed_steps.
     """
     try:
         from app.db.models.session import ChatSession
 
         session = ChatSession.objects.get(id=session_id)
-        if session.metadata and "completed_steps" in session.metadata:
-            del session.metadata["completed_steps"]
+        modified = False
+
+        if session.metadata:
+            # Clear new format
+            if "workflow_state" in session.metadata:
+                del session.metadata["workflow_state"]
+                modified = True
+
+            # Clear legacy format for backward compatibility
+            if "completed_steps" in session.metadata:
+                del session.metadata["completed_steps"]
+                modified = True
+
+        if modified:
             session.save(update_fields=["metadata"])
-            logger.info(f"[WORKFLOW] Cleared completed_steps from session {session_id}")
+            logger.info(f"[WORKFLOW] Cleared workflow_state from session {session_id}")
     except Exception as e:
-        logger.warning(f"[WORKFLOW] Failed to clear completed_steps: {e}")
+        logger.warning(f"[WORKFLOW] Failed to clear workflow_state: {e}")
 
 
 def request_plan_approval(
@@ -519,14 +675,14 @@ def execute_plan_steps(
     if not state.plan:
         return []
 
-    # Load previously completed steps from database (for resume scenarios)
+    # Load previously stored workflow state from database (for resume scenarios)
     # This is critical because WorkflowState is recreated fresh on each invocation
+    # Without this, we'd have completed_steps but empty data (chunks, player_fields, etc.)
     if not state.completed_steps and state.session_id:
-        stored_steps = load_completed_steps_from_session(state.session_id)
-        if stored_steps:
-            state.completed_steps = stored_steps
+        if load_workflow_state_from_session(state.session_id, state):
             logger.info(
-                f"[WORKFLOW] Restored completed_steps from session: {stored_steps}"
+                f"[WORKFLOW] Restored workflow state from session: "
+                f"completed_steps={state.completed_steps}"
             )
 
     step_results = []
@@ -591,9 +747,10 @@ def execute_plan_steps(
             # Mark step as completed (important for resume after HITL gates)
             state.completed_steps.append(idx)
 
-            # Persist to database so it survives HITL interrupts
+            # Persist full workflow state to database so it survives HITL interrupts
+            # This saves not just completed_steps, but also all_chunks, player_fields, etc.
             if state.session_id:
-                save_completed_steps_to_session(state.session_id, state.completed_steps)
+                save_workflow_state_to_session(state.session_id, state)
 
             # Emit step complete
             emit_workflow_event(
@@ -609,12 +766,13 @@ def execute_plan_steps(
             )
 
         except GraphInterrupt:
-            # Save progress before interrupt so resume knows where we were
-            # This is critical - without this, resume would re-run all steps
+            # Save full workflow state before interrupt so resume has all data
+            # This is critical - without this, resume would have empty state data
             if state.session_id:
-                save_completed_steps_to_session(state.session_id, state.completed_steps)
+                save_workflow_state_to_session(state.session_id, state)
                 logger.info(
-                    f"[WORKFLOW] Saved progress before interrupt: completed_steps={state.completed_steps}"
+                    f"[WORKFLOW] Saved workflow state before interrupt: "
+                    f"completed_steps={state.completed_steps}, has_preview={state.preview is not None}"
                 )
             # Re-raise GraphInterrupt so HITL gates work properly
             # This allows save_player step to pause for player approval
@@ -641,9 +799,9 @@ def execute_plan_steps(
                 },
             )
 
-    # Clear completed_steps from session when workflow completes successfully
+    # Clear workflow state from session when workflow completes successfully
     if state.session_id:
-        clear_completed_steps_from_session(state.session_id)
+        clear_workflow_state_from_session(state.session_id)
 
     return step_results
 

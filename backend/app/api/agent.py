@@ -1525,6 +1525,40 @@ async def approve_player(request):
             f"[PLAYER_HITL] [RESUME] Player approval request: user={user.id} session={chat_session_id} action={action}"
         )
 
+        # Persist player_preview_status to the plan message metadata
+        # This ensures the status survives page refresh
+        if action in ("approve", "reject"):
+            try:
+                from app.db.models.message import Message
+
+                # Find the most recent assistant message with player_preview data
+                @sync_to_async
+                def update_player_preview_status():
+                    messages = Message.objects.filter(
+                        session_id=chat_session_id,
+                        role="assistant",
+                        sender_type="ui"  # UI messages contain plan/preview data
+                    ).order_by("-created_at")[:5]
+
+                    for message in messages:
+                        if message.metadata and message.metadata.get("player_preview"):
+                            # Update the metadata with the approval status
+                            message.metadata["player_preview_status"] = (
+                                "approved" if action == "approve" else "rejected"
+                            )
+                            message.save(update_fields=["metadata"])
+                            logger.info(
+                                f"[PLAYER_HITL] Updated message {message.id} with player_preview_status={action}"
+                            )
+                            return True
+                    return False
+
+                await update_player_preview_status()
+            except Exception as e:
+                logger.warning(
+                    f"[PLAYER_HITL] Failed to persist player_preview_status: {e}"
+                )
+
         # Send resume signal to Temporal workflow (human-in-the-loop integration)
         try:
             from app.core.temporal import get_temporal_client

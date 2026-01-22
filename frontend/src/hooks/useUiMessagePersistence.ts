@@ -76,8 +76,11 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
       })
 
       const savedId = response.data.id
+      // Store mapping with BOTH temp ID and DB ID as keys
+      // This ensures updatePlanProgress works whether called with temp ID or DB ID
       savedMessagesRef.current.set(`plan_${tempMessageId}`, { id: savedId, tempId: tempMessageId })
-      
+      savedMessagesRef.current.set(`plan_${savedId}`, { id: savedId, tempId: tempMessageId })
+
       console.log(`[UI_PERSIST] Saved plan proposal: tempId=${tempMessageId} dbId=${savedId}`)
       return savedId
     } catch (error) {
@@ -88,9 +91,10 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
 
   /**
    * Update a saved plan message with progress information.
+   * Handles both temp IDs (from streaming) and DB IDs (after message_saved event).
    */
   const updatePlanProgress = useCallback(async (
-    tempMessageId: number,
+    messageId: number,
     progress: PlanProgress
   ): Promise<boolean> => {
     if (!sessionId) {
@@ -98,20 +102,32 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
       return false
     }
 
-    const savedMessage = savedMessagesRef.current.get(`plan_${tempMessageId}`)
-    if (!savedMessage) {
-      console.warn(`[UI_PERSIST] No saved message found for tempId=${tempMessageId}`)
+    // Try to find mapping in ref (works for both temp ID and DB ID keys)
+    const savedMessage = savedMessagesRef.current.get(`plan_${messageId}`)
+
+    // Determine the DB ID to use for the API call
+    let dbIdToUpdate: number
+    if (savedMessage) {
+      dbIdToUpdate = savedMessage.id
+    } else if (messageId > 0 && messageId < 1000000) {
+      // If messageId looks like a real DB ID (positive, reasonable size),
+      // try to update it directly. This handles cases after page refresh
+      // where savedMessagesRef is empty but we have the real DB ID.
+      dbIdToUpdate = messageId
+      console.log(`[UI_PERSIST] No mapping found for messageId=${messageId}, using it directly as DB ID`)
+    } else {
+      console.warn(`[UI_PERSIST] No saved message found for messageId=${messageId} and it doesn't look like a DB ID`)
       return false
     }
 
     try {
-      await chatAPI.updateUiMessage(sessionId, savedMessage.id, {
+      await chatAPI.updateUiMessage(sessionId, dbIdToUpdate, {
         metadata: {
           plan_progress: progress
         }
       })
 
-      console.log(`[UI_PERSIST] Updated plan progress: tempId=${tempMessageId} dbId=${savedMessage.id} step=${progress.current_step_index + 1}/${progress.total_steps}`)
+      console.log(`[UI_PERSIST] Updated plan progress: messageId=${messageId} dbId=${dbIdToUpdate} step=${progress.current_step_index + 1}/${progress.total_steps}`)
       return true
     } catch (error) {
       console.error('[UI_PERSIST] Failed to update plan progress:', error)
@@ -120,7 +136,58 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
   }, [sessionId])
 
   /**
-   * Save a player preview message to the backend.
+   * Update an existing message with player preview data.
+   * This updates the plan message to include player_preview instead of creating a separate message.
+   */
+  const updateMessageWithPlayerPreview = useCallback(async (
+    messageId: number,
+    playerPreview: {
+      player: Record<string, any>
+      report_summary: string[]
+      report_text: string
+      session_id?: number
+    }
+  ): Promise<boolean> => {
+    if (!sessionId) {
+      console.warn('[UI_PERSIST] No session ID, cannot update with player preview')
+      return false
+    }
+
+    // Try to find mapping in ref (works for both temp ID and DB ID keys)
+    const savedMessage = savedMessagesRef.current.get(`plan_${messageId}`)
+
+    // Determine the DB ID to use for the API call
+    let dbIdToUpdate: number
+    if (savedMessage) {
+      dbIdToUpdate = savedMessage.id
+    } else if (messageId > 0 && messageId < 1000000) {
+      // If messageId looks like a real DB ID, use it directly
+      dbIdToUpdate = messageId
+      console.log(`[UI_PERSIST] No mapping found for messageId=${messageId}, using it directly as DB ID`)
+    } else {
+      console.warn(`[UI_PERSIST] No saved message found for messageId=${messageId} and it doesn't look like a DB ID`)
+      return false
+    }
+
+    try {
+      await chatAPI.updateUiMessage(sessionId, dbIdToUpdate, {
+        metadata: {
+          response_type: 'player_preview',
+          player_preview: playerPreview,
+        }
+      })
+
+      console.log(`[UI_PERSIST] Updated message with player preview: messageId=${messageId} dbId=${dbIdToUpdate}`)
+      return true
+    } catch (error) {
+      console.error('[UI_PERSIST] Failed to update with player preview:', error)
+      return false
+    }
+  }, [sessionId])
+
+  /**
+   * Save a player preview message to the backend (creates new message - DEPRECATED).
+   * Use updateMessageWithPlayerPreview instead to update existing plan message.
    */
   const savePlayerPreview = useCallback(async (
     tempMessageId: number,
@@ -150,7 +217,7 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
 
       const savedId = response.data.id
       savedMessagesRef.current.set(`player_${tempMessageId}`, { id: savedId, tempId: tempMessageId })
-      
+
       console.log(`[UI_PERSIST] Saved player preview: tempId=${tempMessageId} dbId=${savedId}`)
       return savedId
     } catch (error) {
@@ -177,6 +244,7 @@ export function useUiMessagePersistence({ sessionId }: UseUiMessagePersistencePr
   return {
     savePlanProposal,
     updatePlanProgress,
+    updateMessageWithPlayerPreview,
     savePlayerPreview,
     clearSavedMessages,
     getDbIdForTempId,

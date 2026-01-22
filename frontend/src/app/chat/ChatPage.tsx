@@ -1102,10 +1102,10 @@ export default function ChatPage() {
                   }
                 })
                 
-                // Persist player preview to backend (UI-only message)
+                // Persist player preview to backend by updating the plan message
                 // This ensures the player preview survives page refresh
-                savePlayerPreview(assistantMessageId, playerPreview).catch(err => {
-                  console.error('[UI_PERSIST] Failed to save player preview:', err)
+                updateMessageWithPlayerPreview(assistantMessageId, playerPreview).catch(err => {
+                  console.error('[UI_PERSIST] Failed to update message with player preview:', err)
                 })
 
               // Don't set sending=false here - we're waiting for resume
@@ -1418,7 +1418,7 @@ export default function ChatPage() {
   const {
     savePlanProposal,
     updatePlanProgress,
-    savePlayerPreview,
+    updateMessageWithPlayerPreview,
     clearSavedMessages,
   } = useUiMessagePersistence({
     sessionId: currentSession?.id ?? null,
@@ -1457,6 +1457,10 @@ export default function ChatPage() {
     // Track if we received a player_approval interrupt - if so, don't reload messages on complete
     // This prevents loadMessages() from clearing the player preview we just set
     let receivedPlayerApproval = false
+    // Track the temp ID of any final message we create (for updating with DB ID later)
+    let finalMessageTempId: number | null = null
+    // Accumulate all completed steps for persistence (backend needs full state, not just current step)
+    const accumulatedStepsStatus: Record<number, { status: string; step_name: string; result?: string }> = {}
 
     const resumeStream = createResumeStream(
       currentSession.id,
@@ -1507,18 +1511,19 @@ export default function ChatPage() {
             }
           })
 
-          // Persist plan progress to backend
+          // Accumulate step status for persistence
           if (progressData.status === 'completed' || progressData.status === 'error') {
+            accumulatedStepsStatus[progressData.step_index] = {
+              status: progressData.status,
+              step_name: progressData.step_name,
+              result: progressData.result,
+            }
+
+            // Persist accumulated plan progress to backend (includes ALL completed steps)
             const updatedProgress = {
               current_step_index: progressData.step_index,
               total_steps: progressData.total_steps,
-              steps_status: {
-                [progressData.step_index]: {
-                  status: progressData.status,
-                  step_name: progressData.step_name,
-                  result: progressData.result,
-                }
-              }
+              steps_status: { ...accumulatedStepsStatus }
             }
             updatePlanProgress(assistantMessageId, updatedProgress).catch(err => {
               console.error('[RESUME_STREAM] Failed to update plan progress:', err)
@@ -1540,10 +1545,11 @@ export default function ChatPage() {
           // Update message with real DB id
           const savedData = event.data || {}
           if (savedData.db_id && savedData.role === 'assistant') {
-            console.log(`[RESUME_STREAM] Message saved with db_id=${savedData.db_id}`)
+            console.log(`[RESUME_STREAM] Message saved with db_id=${savedData.db_id}, assistantMessageId=${assistantMessageId}, finalMessageTempId=${finalMessageTempId}`)
             set((state: { messages: Message[] }) => ({
               messages: state.messages.map((msg: Message) =>
-                msg.id === assistantMessageId
+                // Check if this message matches either the original assistantMessageId or the finalMessageTempId
+                (msg.id === assistantMessageId || (finalMessageTempId !== null && msg.id === finalMessageTempId))
                   ? { ...msg, id: savedData.db_id }
                   : msg
               ),
@@ -1621,12 +1627,10 @@ export default function ChatPage() {
               }
             })
             
-            // Persist player preview to backend (UI-only message)
+            // Persist player preview to backend by updating the plan message
             // This ensures the player preview survives page refresh
-            // Use a new temp ID for the player preview since it's a separate UI message
-            const playerPreviewMessageId = Date.now()
-            savePlayerPreview(playerPreviewMessageId, playerPreview).catch(err => {
-              console.error('[RESUME_STREAM] Failed to save player preview:', err)
+            updateMessageWithPlayerPreview(assistantMessageId, playerPreview).catch(err => {
+              console.error('[RESUME_STREAM] Failed to update message with player preview:', err)
             })
             
             // DON'T clear executingPlanMessageId yet - we're in player approval stage
@@ -1644,36 +1648,68 @@ export default function ChatPage() {
           // DON'T reload messages here - we have the data we need and loadMessages would clear temp messages
         } else if (eventType === 'final' || eventType === 'done') {
           console.log(`[RESUME_STREAM] Stream finished with ${eventType}`, event.data)
-          
+
           // Mark plan as completed
           setCompletedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
           setApprovedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
           setPlanPanelCollapsed(true)
           setExecutingPlanMessageId(null)
-          
-          // Extract final response and update message content (if any)
+
+          // Extract final response and add/update message content (if any)
           const finalResponse = event.data?.response || event.data
           if (finalResponse?.reply) {
-            set((state: { messages: Message[] }) => ({
-              messages: state.messages.map((msg: Message) =>
-                msg.id === assistantMessageId
-                  ? { 
-                      ...msg, 
-                      content: finalResponse.reply,
-                      response_type: 'answer',
-                      // Mark player preview as saved if workflow completed successfully
-                      player_preview_status: msg.player_preview ? 'approved' as const : undefined
-                    }
-                  : msg
-              ),
-            }))
+            set((state: { messages: Message[] }) => {
+              // Try to find existing message to update
+              const existingMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+
+              if (existingMessage) {
+                // Update existing message
+                console.log(`[RESUME_STREAM] Updating existing message ${assistantMessageId} with final response`)
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? {
+                          ...msg,
+                          content: finalResponse.reply,
+                          response_type: 'answer',
+                          // Mark player preview as saved if workflow completed successfully
+                          player_preview_status: msg.player_preview ? 'approved' as const : undefined
+                        }
+                      : msg
+                  ),
+                }
+              } else {
+                // Create new message for final response
+                const tempId = generateTempMessageId()
+                finalMessageTempId = tempId // Store for message_saved handler
+                console.log(`[RESUME_STREAM] Creating new message for final response (no message found with id=${assistantMessageId}), using tempId=${tempId}`)
+                const newMessage: Message = {
+                  id: tempId,
+                  role: 'assistant',
+                  content: finalResponse.reply,
+                  tokens_used: 0,
+                  created_at: new Date().toISOString(),
+                  metadata: {
+                    agent_name: finalResponse.agent_name || 'scouting',
+                  },
+                  response_type: 'answer',
+                }
+                return {
+                  messages: [...state.messages, newMessage],
+                }
+              }
+            })
           }
-          
+
           // Show success toast
           toast.success('Report saved successfully')
-          
-          // DON'T call loadMessages() - we have all the data we need
-          // User can refresh if they want fresh DB state
+
+          // If no reply was in the event data, load messages to get the final response from DB
+          // This handles the case where the backend saved the message but didn't stream the reply
+          if (!finalResponse?.reply && currentSession) {
+            console.log(`[RESUME_STREAM] No reply in done event, loading messages to get final response`)
+            loadMessages(currentSession.id)
+          }
         } else if (eventType === 'error') {
           console.error(`[RESUME_STREAM] Error event:`, event.data)
           toast.error(event.data?.error || 'Error during plan execution')
@@ -1699,7 +1735,7 @@ export default function ChatPage() {
     )
 
     resumeStreamRef.current = resumeStream
-  }, [currentSession, executingPlanMessageId, set, updatePlanProgress, savePlayerPreview, setCompletedPlanMessageIds, setApprovedPlanMessageIds])
+  }, [currentSession, executingPlanMessageId, set, updatePlanProgress, updateMessageWithPlayerPreview, setCompletedPlanMessageIds, setApprovedPlanMessageIds, loadMessages])
 
   // Tool Approval Hook
   // Location: frontend/src/hooks/useToolApproval.ts
