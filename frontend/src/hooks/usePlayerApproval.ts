@@ -146,7 +146,7 @@ export function usePlayerApproval({
         return next
       })
     }
-  }, [currentSession, approvingPlayers])
+  }, [currentSession, approvingPlayers, updateMessages])
 
   return {
     handleApprovePlayer,

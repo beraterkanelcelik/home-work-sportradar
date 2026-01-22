@@ -68,11 +68,34 @@ export function usePlanApproval({
 
     setApprovingPlans(prev => new Set(prev).add(messageId))
     setExecutingPlanMessageId(messageId)
-    
+
     // Mark plan as approved immediately (survives loadMessages)
     if (markPlanApproved) {
       markPlanApproved(messageId)
     }
+
+    // Immediately update the "Awaiting plan approval..." status message to "Plan approved"
+    // This prevents race condition where the backend event is missed due to SSE stream reconnection
+    updateMessages((messages: Message[]) =>
+      messages.map((msg: Message) => {
+        if (
+          msg.role === 'system' &&
+          msg.metadata?.status_type === 'task_status' &&
+          msg.metadata?.task === 'plan_approval' &&
+          !msg.metadata?.is_completed
+        ) {
+          return {
+            ...msg,
+            content: 'Plan approved',
+            metadata: {
+              ...msg.metadata,
+              is_completed: true,
+            },
+          }
+        }
+        return msg
+      })
+    )
 
     try {
       const response = await agentAPI.approvePlan({
@@ -108,7 +131,7 @@ export function usePlanApproval({
         return next
       })
     }
-  }, [currentSession, approvingPlans, setExecutingPlanMessageId, markPlanApproved, onResumeStream])
+  }, [currentSession, approvingPlans, updateMessages, setExecutingPlanMessageId, markPlanApproved, onResumeStream])
 
   const handleRejectPlan = useCallback(async (messageId: number) => {
     if (!currentSession) {
@@ -117,6 +140,29 @@ export function usePlanApproval({
     }
 
     console.log(`[PLAN_APPROVAL] User rejected plan: message=${messageId}`)
+
+    // Immediately update the "Awaiting plan approval..." status message to "Plan rejected"
+    // This prevents race condition where the backend event is missed
+    updateMessages((messages: Message[]) =>
+      messages.map((msg: Message) => {
+        if (
+          msg.role === 'system' &&
+          msg.metadata?.status_type === 'task_status' &&
+          msg.metadata?.task === 'plan_approval' &&
+          !msg.metadata?.is_completed
+        ) {
+          return {
+            ...msg,
+            content: 'Plan rejected',
+            metadata: {
+              ...msg.metadata,
+              is_completed: true,
+            },
+          }
+        }
+        return msg
+      })
+    )
 
     try {
       const response = await agentAPI.approvePlan({
@@ -136,7 +182,7 @@ export function usePlanApproval({
       console.error(`[PLAN_APPROVAL] Error rejecting plan:`, error)
       toast.error(getErrorMessage(error, 'Failed to reject plan'))
     }
-  }, [currentSession])
+  }, [currentSession, updateMessages])
 
   return {
     handleApprovePlan,
