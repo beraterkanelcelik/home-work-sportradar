@@ -71,6 +71,7 @@ A scouting agent that demonstrates:
 |------|-------------|-----------|
 | `search_documents` | RAG retrieval via pgvector | Embedding search, returns ranked chunks |
 | `save_player_report` | Persists scouting report | Creates Player + ScoutingReport records |
+| `list_reports` | Query existing reports | DB lookup with filtering, prevents duplicates |
 | `plan_generation` | LLM-powered planning | Analyzes request, generates 3-5 search steps |
 
 ---
@@ -102,7 +103,102 @@ A scouting agent that demonstrates:
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for detailed diagrams.
+### System Overview
+
+```mermaid
+flowchart TB
+    subgraph Client["Frontend (React + Zustand)"]
+        UI[Chat UI]
+        SSE[SSE Stream]
+        State[Zustand Store]
+    end
+
+    subgraph Backend["Backend (Django + ASGI)"]
+        API[REST API]
+        WM[Workflow Manager]
+    end
+
+    subgraph Temporal["Temporal Orchestration"]
+        TS[Temporal Server]
+        TW[Temporal Worker]
+    end
+
+    subgraph StateGraph["LangGraph StateGraph"]
+        PN[Planner]
+        AN[Agent]
+        TN[Tools]
+        CN[Composer]
+    end
+
+    subgraph Infra["Infrastructure"]
+        PG[(PostgreSQL)]
+        RD[(Redis)]
+        LF[Langfuse]
+    end
+
+    UI -->|HTTP| API
+    API -->|Signal| TS
+    TS -->|Execute| TW
+    TW --> StateGraph
+    StateGraph -->|Publish| RD
+    RD -->|Subscribe| SSE
+    SSE --> State --> UI
+    StateGraph -->|Checkpoint| PG
+    StateGraph -->|Trace| LF
+```
+
+### Agent Workflow (StateGraph)
+
+```mermaid
+flowchart TD
+    START((Start)) --> PN[Planner Node]
+
+    PN -->|Scouting| PA[Plan Approval]
+    PN -->|Chat| AN[Agent Node]
+
+    PA -->|"HITL Gate 1"| AN
+
+    AN -->|Tool Call| TN[Tool Node]
+    AN -->|Save Request| CN[Compose Node]
+    AN -->|Done| END((End))
+
+    TN --> AN
+
+    CN -->|Preview Ready| AP[Approval Node]
+
+    AP -->|"HITL Gate 2"| AN
+
+    style PA fill:#f9f,stroke:#333
+    style AP fill:#f9f,stroke:#333
+    style CN fill:#bbf,stroke:#333
+```
+
+### Real-Time Streaming
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant API as Django
+    participant TW as Temporal
+    participant RD as Redis
+
+    FE->>API: POST /stream
+    API->>TW: signal_with_start
+
+    loop Each Node
+        TW->>RD: PUBLISH events
+        RD-->>FE: SSE (tokens/tasks)
+    end
+
+    TW->>RD: interrupt
+    RD-->>FE: Show Approval UI
+    FE->>API: POST /approve
+    API->>TW: resume signal
+    TW->>RD: final
+    RD-->>FE: Done
+```
+
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for more diagrams.
 
 **Core Stack:**
 - **Frontend:** React 18 + Zustand + SSE streaming
