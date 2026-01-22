@@ -301,10 +301,9 @@ class ResumePayload(BaseModel):
     approved: Optional[bool] = Field(default=None, description="Whether the plan was approved")
 
     # For player approval (action-based)
-    action: Optional[Literal["approve", "reject", "edit_wording", "edit_content"]] = Field(
+    action: Optional[Literal["approve", "reject"]] = Field(
         default=None, description="Player approval action"
     )
-    feedback: Optional[str] = Field(default=None, description="Feedback for edit_content action")
 
     # Common fields
     run_id: Optional[str] = Field(default=None, description="Run ID for tracking")

@@ -18,7 +18,7 @@
  * Location: frontend/src/components/chat/StatsDialog.tsx
  */
 
-import React from 'react'
+import React, { useState } from 'react'
 import type { Message } from '@/state/useChatStore'
 
 interface StatsDialogProps {
@@ -67,6 +67,22 @@ export default function StatsDialog({
   onToggleChain,
   onToggleActivity,
 }: StatsDialogProps) {
+  // Track expanded input/output sections within activities
+  // Format: "activityKey-input" or "activityKey-output"
+  const [expandedFields, setExpandedFields] = useState<Set<string>>(new Set())
+
+  const toggleField = (fieldKey: string) => {
+    setExpandedFields(prev => {
+      const next = new Set(prev)
+      if (next.has(fieldKey)) {
+        next.delete(fieldKey)
+      } else {
+        next.add(fieldKey)
+      }
+      return next
+    })
+  }
+
   if (!open) return null
 
   return (
@@ -461,34 +477,110 @@ export default function StatsDialog({
                                               {/* Tool calls */}
                                               {activity.tools && activity.tools.length > 0 && (
                                                 <div className="mt-2 space-y-1">
-                                                  {activity.tools.map((tool: any, toolIndex: number) => (
-                                                    <div key={toolIndex} className="text-sm bg-muted/50 p-2 rounded">
-                                                      <span className="font-mono text-xs">{tool.name}</span>
-                                                      {tool.input && (
-                                                        <div className="text-xs text-muted-foreground mt-1 break-words">
-                                                          {typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input).substring(0, 200)}
+                                                  {activity.tools.map((tool: any, toolIndex: number) => {
+                                                    const toolFieldKey = `${activityKey}-tool-${toolIndex}`
+                                                    const isToolExpanded = expandedFields.has(toolFieldKey)
+                                                    const toolInputStr = tool.input ? (typeof tool.input === 'string' ? tool.input : JSON.stringify(tool.input, null, 2)) : ''
+                                                    const isLongToolInput = toolInputStr.length > 200
+
+                                                    return (
+                                                      <div key={toolIndex} className="text-sm bg-muted/50 p-2 rounded">
+                                                        <div className="flex items-center justify-between">
+                                                          <span className="font-mono text-xs">{tool.name}</span>
+                                                          {isLongToolInput && (
+                                                            <button
+                                                              onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                toggleField(toolFieldKey)
+                                                              }}
+                                                              className="text-xs text-primary hover:underline"
+                                                            >
+                                                              {isToolExpanded ? 'Collapse' : 'Expand'}
+                                                            </button>
+                                                          )}
                                                         </div>
-                                                      )}
-                                                    </div>
-                                                  ))}
+                                                        {tool.input && (
+                                                          <div className="text-xs text-muted-foreground mt-1 break-words whitespace-pre-wrap">
+                                                            {isToolExpanded || !isLongToolInput
+                                                              ? toolInputStr
+                                                              : toolInputStr.substring(0, 200) + '...'}
+                                                          </div>
+                                                        )}
+                                                      </div>
+                                                    )
+                                                  })}
                                                 </div>
                                               )}
 
-                                              {/* Input/Output previews */}
+                                              {/* Input/Output previews - collapsible */}
                                               {(activity.input_preview || activity.output_preview) && (
-                                                <div className="mt-2 space-y-1 text-sm">
-                                                  {activity.input_preview && (
-                                                    <div className="bg-muted/30 p-2 rounded">
-                                                      <div className="text-xs text-muted-foreground mb-1">Input:</div>
-                                                      <div className="text-xs font-mono break-words">{activity.input_preview}</div>
-                                                    </div>
-                                                  )}
-                                                  {activity.output_preview && (
-                                                    <div className="bg-muted/30 p-2 rounded">
-                                                      <div className="text-xs text-muted-foreground mb-1">Output:</div>
-                                                      <div className="text-xs font-mono break-words">{activity.output_preview}</div>
-                                                    </div>
-                                                  )}
+                                                <div className="mt-2 space-y-2 text-sm">
+                                                  {activity.input_preview && (() => {
+                                                    const inputFieldKey = `${activityKey}-input`
+                                                    const isInputExpanded = expandedFields.has(inputFieldKey)
+                                                    const inputStr = typeof activity.input_preview === 'string'
+                                                      ? activity.input_preview
+                                                      : JSON.stringify(activity.input_preview, null, 2)
+                                                    const isLongInput = inputStr.length > 300
+
+                                                    return (
+                                                      <div className="bg-muted/30 p-2 rounded">
+                                                        <div className="flex items-center justify-between mb-1">
+                                                          <div className="text-xs text-muted-foreground">Input:</div>
+                                                          {isLongInput && (
+                                                            <button
+                                                              onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                toggleField(inputFieldKey)
+                                                              }}
+                                                              className="text-xs text-primary hover:underline"
+                                                            >
+                                                              {isInputExpanded ? 'Collapse' : 'Expand'}
+                                                            </button>
+                                                          )}
+                                                        </div>
+                                                        <div className={`text-xs font-mono break-words whitespace-pre-wrap ${isLongInput && !isInputExpanded ? 'max-h-32 overflow-hidden relative' : ''}`}>
+                                                          {inputStr}
+                                                          {isLongInput && !isInputExpanded && (
+                                                            <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-muted/30 to-transparent" />
+                                                          )}
+                                                        </div>
+                                                      </div>
+                                                    )
+                                                  })()}
+                                                  {activity.output_preview && (() => {
+                                                    const outputFieldKey = `${activityKey}-output`
+                                                    const isOutputExpanded = expandedFields.has(outputFieldKey)
+                                                    const outputStr = typeof activity.output_preview === 'string'
+                                                      ? activity.output_preview
+                                                      : JSON.stringify(activity.output_preview, null, 2)
+                                                    const isLongOutput = outputStr.length > 300
+
+                                                    return (
+                                                      <div className="bg-muted/30 p-2 rounded">
+                                                        <div className="flex items-center justify-between mb-1">
+                                                          <div className="text-xs text-muted-foreground">Output:</div>
+                                                          {isLongOutput && (
+                                                            <button
+                                                              onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                toggleField(outputFieldKey)
+                                                              }}
+                                                              className="text-xs text-primary hover:underline"
+                                                            >
+                                                              {isOutputExpanded ? 'Collapse' : 'Expand'}
+                                                            </button>
+                                                          )}
+                                                        </div>
+                                                        <div className={`text-xs font-mono break-words whitespace-pre-wrap ${isLongOutput && !isOutputExpanded ? 'max-h-32 overflow-hidden relative' : ''}`}>
+                                                          {outputStr}
+                                                          {isLongOutput && !isOutputExpanded && (
+                                                            <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-muted/30 to-transparent" />
+                                                          )}
+                                                        </div>
+                                                      </div>
+                                                    )
+                                                  })()}
                                                 </div>
                                               )}
 

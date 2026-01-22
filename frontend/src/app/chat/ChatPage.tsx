@@ -126,6 +126,7 @@ export default function ChatPage() {
   const resumeStreamRef = useRef<SSEResumeStream | null>(null)
   const initialMessageSentRef = useRef(false)
   const initialMessageRef = useRef<string | null>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const { user } = useAuthStore()
   const {
@@ -1916,8 +1917,6 @@ export default function ChatPage() {
   const {
     handleApprovePlayer,
     handleRejectPlayer,
-    handleEditWording,
-    handleEditContent,
     approvingPlayers,
   } = usePlayerApproval({
     currentSession,
@@ -2085,7 +2084,7 @@ export default function ChatPage() {
             />
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto">
+            <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
               {messages.length === 0 ? (
                 // Empty state - show centered input with welcome message
                 <ChatInput
@@ -2106,6 +2105,7 @@ export default function ChatPage() {
                 // Messages List Component - Renders all messages
                 // Location: frontend/src/components/chat/MessageList.tsx
                 <MessageList
+                  scrollContainerRef={scrollContainerRef}
                   messages={messages}
                   streamComplete={streamComplete}
                   expandedToolCalls={expandedToolCalls}
@@ -2133,8 +2133,6 @@ export default function ChatPage() {
                   executingPlanMessageId={executingPlanMessageId}
                   onApprovePlayer={handleApprovePlayer}
                   onRejectPlayer={handleRejectPlayer}
-                  onEditPlayerWording={handleEditWording}
-                  onEditPlayerContent={handleEditContent}
                   approvingPlayers={approvingPlayers}
                   userEmail={user?.email}
                 />

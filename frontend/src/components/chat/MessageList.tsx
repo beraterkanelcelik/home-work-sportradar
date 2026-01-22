@@ -12,13 +12,15 @@
  * Location: frontend/src/components/chat/MessageList.tsx
  */
 
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect } from 'react'
 import type { Message } from '@/state/useChatStore'
 import type { PlanProposalData } from '@/components/PlanProposal'
 import type { PlayerPreviewData } from '@/components/PlayerPreview'
 import MessageItem, { type MessageItemProps } from './MessageItem'
 
 interface MessageListProps {
+  /** Ref to the scrollable container */
+  scrollContainerRef?: React.RefObject<HTMLDivElement>
   /** Array of messages to display */
   messages: Message[]
   /** Set of message IDs that have completed streaming */
@@ -45,10 +47,6 @@ interface MessageListProps {
   onApprovePlayer?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
   /** Callback when user rejects a player */
   onRejectPlayer?: (messageId: number) => void
-  /** Callback when user edits player wording */
-  onEditPlayerWording?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
-  /** Callback when user edits player content with feedback */
-  onEditPlayerContent?: (messageId: number, playerPreview: PlayerPreviewData, feedback: string) => Promise<void>
   /** Set of player message IDs currently being approved */
   approvingPlayers?: Set<number>
   /** User email (for user avatar) */
@@ -65,6 +63,7 @@ interface MessageListProps {
  * 4. Handles empty state (no messages)
  */
 export default function MessageList({
+  scrollContainerRef,
   messages,
   streamComplete,
   expandedToolCalls,
@@ -78,17 +77,15 @@ export default function MessageList({
   executingPlanMessageId,
   onApprovePlayer,
   onRejectPlayer,
-  onEditPlayerWording,
-  onEditPlayerContent,
   approvingPlayers,
   userEmail,
 }: MessageListProps) {
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-
   // Auto-scroll to bottom when messages change
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (scrollContainerRef?.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
+    }
+  }, [messages, scrollContainerRef])
 
   // Deduplicate messages by ID before rendering
   // Keep array order intact - status messages are inserted at correct positions
@@ -125,14 +122,10 @@ export default function MessageList({
             executingPlanMessageId={executingPlanMessageId}
             onApprovePlayer={onApprovePlayer}
             onRejectPlayer={onRejectPlayer}
-            onEditPlayerWording={onEditPlayerWording}
-            onEditPlayerContent={onEditPlayerContent}
             approvingPlayers={approvingPlayers}
             userEmail={userEmail}
           />
         ))}
-        {/* Scroll anchor */}
-        <div ref={messagesEndRef} />
       </div>
     </div>
   )

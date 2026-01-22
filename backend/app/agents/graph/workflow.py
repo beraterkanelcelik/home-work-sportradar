@@ -313,6 +313,7 @@ async def stategraph_workflow_events(
             "status_messages": status_messages,  # For EventCallbackHandler in nodes
             # Langfuse credentials for LLM call tracing
             "trace_id": trace_id,
+            "session_id": session_id,  # For Langfuse session-level grouping
             "langfuse_public_key": langfuse_public_key,
             "langfuse_secret_key": langfuse_secret_key,
         },

@@ -58,10 +58,6 @@ export interface MessageItemProps {
   onApprovePlayer?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
   /** Callback when user rejects a player */
   onRejectPlayer?: (messageId: number) => void
-  /** Callback when user edits player wording */
-  onEditPlayerWording?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
-  /** Callback when user edits player content with feedback */
-  onEditPlayerContent?: (messageId: number, playerPreview: PlayerPreviewData, feedback: string) => Promise<void>
   /** Set of player IDs currently being approved */
   approvingPlayers?: Set<number>
   /** User email (for user avatar) */
@@ -96,8 +92,6 @@ export default function MessageItem({
   executingPlanMessageId,
   onApprovePlayer,
   onRejectPlayer,
-  onEditPlayerWording,
-  onEditPlayerContent,
   approvingPlayers,
   userEmail,
 }: MessageItemProps) {
@@ -252,8 +246,6 @@ export default function MessageItem({
               preview={message.player_preview}
               onApprove={() => onApprovePlayer?.(message.id, message.player_preview!)}
               onReject={() => onRejectPlayer?.(message.id)}
-              onEditWording={() => onEditPlayerWording?.(message.id, message.player_preview!)}
-              onEditContent={(feedback) => onEditPlayerContent?.(message.id, message.player_preview!, feedback)}
               isExecuting={approvingPlayers?.has(message.id)}
               isCompleted={!!message.player_preview_status}
               completedAction={message.player_preview_status}

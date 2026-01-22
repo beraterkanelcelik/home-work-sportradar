@@ -3,7 +3,7 @@
  *
  * HITL Gate B UI for scouting workflow player approval.
  * Shows extracted player fields, report summary, and full report text.
- * User can approve, reject, edit wording, or edit content.
+ * User can approve or reject the player.
  */
 
 import React, { useState } from 'react'
@@ -43,8 +43,6 @@ interface PlayerPreviewProps {
   preview: PlayerPreviewData
   onApprove: () => void
   onReject: () => void
-  onEditWording?: () => void
-  onEditContent?: (feedback: string) => void
   isExecuting?: boolean
   /** Whether the player has been approved/rejected (show collapsed summary) */
   isCompleted?: boolean
@@ -56,27 +54,17 @@ export default function PlayerPreview({
   preview,
   onApprove,
   onReject,
-  onEditWording,
-  onEditContent,
   isExecuting = false,
   isCompleted = false,
   completedAction,
 }: PlayerPreviewProps) {
   const navigate = useNavigate()
   const [showFullReport, setShowFullReport] = useState(false)
-  const [feedback, setFeedback] = useState('')
 
   const { player, report_summary, report_text } = preview
 
   const formatSportName = (sport: string): string => {
     return sport === 'nba' ? 'NBA' : sport === 'football' ? 'Football' : 'Unknown'
-  }
-
-  const handleEditContent = () => {
-    if (onEditContent && feedback.trim()) {
-      onEditContent(feedback)
-      setFeedback('')
-    }
   }
 
   // Collapsed view for completed (approved/rejected) player previews
@@ -154,26 +142,6 @@ export default function PlayerPreview({
         </div>
         {!isExecuting && (
           <div className="flex gap-2">
-            {onEditWording && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onEditWording}
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-              >
-                Edit Wording
-              </Button>
-            )}
-            {onEditContent && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowFullReport(true)}
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-              >
-                Edit Content
-              </Button>
-            )}
             <Button
               variant="outline"
               size="sm"
@@ -340,41 +308,6 @@ export default function PlayerPreview({
           </div>
         )}
       </div>
-
-      {/* Edit Content Feedback */}
-      {showFullReport && onEditContent && (
-        <div className="space-y-3 pt-3 border-t">
-          <div className="text-sm font-semibold text-muted-foreground">
-            Feedback for Content Edit
-          </div>
-          <textarea
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder="Describe what additional information should be gathered..."
-            className="w-full min-h-24 rounded-md border bg-background p-2 text-sm"
-          />
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setShowFullReport(false)
-                setFeedback('')
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleEditContent}
-              disabled={!feedback.trim()}
-              className="bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              Submit & Re-run
-            </Button>
-          </div>
-        </div>
-      )}
 
       {!isExecuting && (
         <div className="text-xs text-muted-foreground pt-2 border-t">

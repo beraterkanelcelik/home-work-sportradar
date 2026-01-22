@@ -318,21 +318,35 @@ async def _run_chat_activity_async(
                         else str(uuid.uuid4())
                     )
 
-                    # Create root trace using start_observation with trace_context
-                    # Use trace_context to set the trace_id - this creates/associates with the trace
-                    # Use as_type="span" for the root observation (trace is created automatically)
-                    # user_id and session_id are stored in metadata for trace identification
-                    langfuse_trace = langfuse.start_observation(
-                        as_type="span",
-                        trace_context={"trace_id": trace_id},
-                        name="chat_activity",
-                        metadata={
-                            "chat_id": chat_id,
-                            "user_id": str(user_id) if user_id else None,
-                            "session_id": str(chat_id) if chat_id else None,
-                            "flow": state.get("flow", "main"),
-                        },
-                    )
+                    # Create trace with session_id using low-level API (SDK v3)
+                    # This ensures session_id is set at trace level for proper metrics grouping
+                    try:
+                        # Try to create trace via API (works in SDK v3)
+                        langfuse.api.trace.create(
+                            id=trace_id,
+                            name="chat_activity",
+                            session_id=str(chat_id) if chat_id else None,
+                            user_id=str(user_id) if user_id else None,
+                            metadata={
+                                "chat_id": chat_id,
+                                "flow": state.get("flow", "main"),
+                            },
+                        )
+                        langfuse_trace = trace_id  # Store trace_id for reference
+                    except Exception as api_err:
+                        logger.debug(f"[LANGFUSE] api.trace.create not available: {api_err}")
+                        # Fallback: use start_observation (session_id in metadata only)
+                        langfuse_trace = langfuse.start_observation(
+                            as_type="span",
+                            trace_context={"trace_id": trace_id},
+                            name="chat_activity",
+                            metadata={
+                                "chat_id": chat_id,
+                                "user_id": str(user_id) if user_id else None,
+                                "session_id": str(chat_id) if chat_id else None,
+                                "flow": state.get("flow", "main"),
+                            },
+                        )
                     logger.info(
                         f"[LANGFUSE] Created root trace id={trace_id} for chat_id={chat_id}"
                     )
@@ -687,20 +701,26 @@ async def _run_chat_activity_async(
         await publish_tracker.wait_for_pending(timeout=5.0)
 
         # End Langfuse trace if created and flush traces
-        if langfuse_trace:
+        # Note: langfuse_trace may be a span object (with .end()) or a string trace_id
+        if langfuse_trace and hasattr(langfuse_trace, 'end'):
             try:
                 langfuse_trace.end()
                 logger.debug(f"[LANGFUSE] Ended trace id={trace_id}")
             except Exception as e:
                 logger.warning(f"Failed to end Langfuse trace: {e}", exc_info=True)
 
-        # Flush Langfuse traces to ensure they're sent
-        if LANGFUSE_ENABLED:
+        # Flush Langfuse traces to ensure they're sent (use user-specific client)
+        if LANGFUSE_ENABLED and api_key_ctx and api_key_ctx.langfuse_public_key:
             try:
-                from app.observability.tracing import flush_traces
+                from app.observability.tracing import get_langfuse_client_for_user
 
-                flush_traces()
-                logger.debug(f"[LANGFUSE] Flushed traces for chat_id={chat_id}")
+                langfuse_client = get_langfuse_client_for_user(
+                    api_key_ctx.langfuse_public_key,
+                    api_key_ctx.langfuse_secret_key,
+                )
+                if langfuse_client and hasattr(langfuse_client, "flush"):
+                    langfuse_client.flush()
+                    logger.debug(f"[LANGFUSE] Flushed traces for chat_id={chat_id}")
             except Exception as e:
                 logger.warning(f"Failed to flush Langfuse traces: {e}", exc_info=True)
 

@@ -6,6 +6,7 @@ Nodes use Pydantic models from models.py for validation where appropriate.
 """
 
 from typing import Dict, Any, Optional
+from contextlib import contextmanager
 from pydantic import ValidationError
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
@@ -36,6 +37,92 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+# =============================================================================
+# Langfuse Tracing Helpers
+# =============================================================================
+
+def _update_span_output(config: RunnableConfig, span: Any, output: str) -> None:
+    """
+    Update a Langfuse span with output data.
+
+    Handles span objects with .update() method.
+    """
+    if span is None:
+        return
+
+    # If it's a span object with .update() method, use it
+    if hasattr(span, 'update'):
+        try:
+            span.update(output=output)
+            logger.debug(f"[LANGFUSE] Updated span output")
+        except Exception as e:
+            logger.debug(f"[LANGFUSE] Failed to update span via .update(): {e}")
+
+
+@contextmanager
+def langfuse_span(config: RunnableConfig, name: str, metadata: Optional[Dict[str, Any]] = None):
+    """
+    Create a Langfuse span for tracing node/tool execution.
+
+    Uses the Langfuse client from config to create a span linked to the existing trace.
+    In SDK v3, we use start_as_current_observation with trace_context parameter.
+
+    Reference: https://langfuse.com/docs/observability/features/trace-ids-and-distributed-tracing
+    """
+    configurable = config.get("configurable", {})
+    public_key = configurable.get("langfuse_public_key")
+    secret_key = configurable.get("langfuse_secret_key")
+    trace_id = configurable.get("trace_id")
+
+    if not public_key or not secret_key:
+        yield None
+        return
+
+    if not trace_id:
+        logger.debug(f"[LANGFUSE] No trace_id in config, skipping span '{name}'")
+        yield None
+        return
+
+    try:
+        from app.observability.tracing import get_langfuse_client_for_user
+
+        langfuse = get_langfuse_client_for_user(public_key, secret_key)
+        if not langfuse:
+            yield None
+            return
+
+        # SDK v3: Use start_as_current_observation with trace_context to link to existing trace
+        # This creates a span under the specified trace_id
+        try:
+            observation_ctx = langfuse.start_as_current_observation(
+                as_type="span",
+                name=name,
+                trace_context={"trace_id": trace_id},
+                metadata=metadata or {},
+            )
+            # Enter the context manager
+            span = observation_ctx.__enter__()
+            logger.info(f"[LANGFUSE] Created span '{name}' for trace={trace_id[:8]}...")
+
+            try:
+                yield span
+            finally:
+                # Exit the context manager
+                try:
+                    observation_ctx.__exit__(None, None, None)
+                    logger.debug(f"[LANGFUSE] Ended span '{name}'")
+                except Exception as e:
+                    logger.debug(f"[LANGFUSE] Error ending span '{name}': {e}")
+
+        except Exception as e:
+            logger.warning(f"[LANGFUSE] start_as_current_observation failed for '{name}': {e}")
+            yield None
+
+    except Exception as e:
+        logger.warning(f"[LANGFUSE] Failed to create span '{name}': {e}")
+        yield None
+
+
 def _get_langfuse_callback(config: RunnableConfig) -> Optional[Any]:
     """
     Get Langfuse CallbackHandler from config for LLM call tracing.
@@ -49,12 +136,13 @@ def _get_langfuse_callback(config: RunnableConfig) -> Optional[Any]:
     trace_id = configurable.get("trace_id")
 
     if not public_key or not secret_key:
-        logger.debug("[LANGFUSE] No Langfuse credentials in config, skipping LLM tracing")
+        logger.info(f"[LANGFUSE] No Langfuse credentials in config (public_key={bool(public_key)}, secret_key={bool(secret_key)}), skipping LLM tracing")
         return None
 
     try:
         from app.observability.tracing import get_callback_handler_for_user
 
+        logger.info(f"[LANGFUSE] Attempting to create CallbackHandler (trace_id={trace_id[:8] if trace_id else 'none'}...)")
         handler = get_callback_handler_for_user(
             public_key=public_key,
             secret_key=secret_key,
@@ -62,12 +150,31 @@ def _get_langfuse_callback(config: RunnableConfig) -> Optional[Any]:
         )
 
         if handler:
-            logger.debug(f"[LANGFUSE] Created CallbackHandler for LLM tracing (trace_id={trace_id[:8] if trace_id else 'none'}...)")
+            logger.info(f"[LANGFUSE] Created CallbackHandler for LLM tracing (trace_id={trace_id[:8] if trace_id else 'none'}...)")
+        else:
+            logger.info(f"[LANGFUSE] CallbackHandler creation returned None")
         return handler
 
     except Exception as e:
         logger.warning(f"[LANGFUSE] Failed to create CallbackHandler: {e}")
         return None
+
+
+def _get_langfuse_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Get Langfuse metadata for LLM invocation.
+
+    In Langfuse SDK v3, session_id is passed via metadata when invoking
+    the LLM, enabling session-level metrics grouping.
+    """
+    from app.observability.tracing import get_langfuse_metadata
+
+    metadata = get_langfuse_metadata(
+        session_id=state.get("session_id"),
+        user_id=state.get("user_id"),
+    )
+    logger.info(f"[LANGFUSE] Metadata for LLM invocation: {metadata}")
+    return metadata
 
 
 def agent_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -97,19 +204,20 @@ def agent_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     if event_queue:
         callbacks.append(EventCallbackHandler(event_queue, status_messages))
 
-    # Add Langfuse callback for LLM call tracing (generations, tokens, latency)
+    # Get Langfuse callback for LLM call tracing (generations, tokens, latency)
+    # In SDK v3, the callback should be passed in invoke config, not LLM constructor
     langfuse_callback = _get_langfuse_callback(config)
-    if langfuse_callback:
-        callbacks.append(langfuse_callback)
-        logger.debug("[AGENT_NODE] Langfuse callback attached for LLM tracing")
 
-    # Create LLM with tools
+    # Get Langfuse metadata for session-level grouping (SDK v3)
+    langfuse_metadata = _get_langfuse_metadata(state)
+
+    # Create LLM with tools (streaming callbacks for frontend only)
     llm = ChatOpenAI(
         model="gpt-4o",
         api_key=state["api_key"],
         temperature=0.3,
         streaming=True,
-        callbacks=callbacks,
+        callbacks=callbacks,  # Frontend streaming callbacks only
     ).bind_tools(TOOLS)
 
     # Build context message
@@ -193,7 +301,15 @@ Do NOT respond with text - call the tool immediately!
     if context_parts:
         messages.append(SystemMessage(content=f"[Current State]\n{context_msg}"))
 
-    response = llm.invoke(messages)
+    # Wrap agent LLM call in span for tracing
+    with langfuse_span(config, "node:agent", metadata={"session_id": state.get("session_id")}) as agent_span:
+        # Include Langfuse callback + metadata for session-level grouping (SDK v3)
+        # Callback must be in config (not LLM constructor) for metadata to be picked up
+        invoke_config = {"metadata": langfuse_metadata}
+        if langfuse_callback:
+            invoke_config["callbacks"] = [langfuse_callback]
+        response = llm.invoke(messages, config=invoke_config)
+        _update_span_output(config, agent_span, f"has_tool_calls={bool(response.tool_calls)}")
 
     logger.info(f"[AGENT_NODE] Response: has_tool_calls={bool(response.tool_calls)}")
 
@@ -289,30 +405,41 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             "plan_approved": True,  # Skip approval if no plan needed
         }
 
-    # Set up callbacks: streaming + Langfuse tracing
+    # Set up callbacks for frontend streaming
     callbacks = []
 
     # Add event streaming callback for frontend status messages
     if event_queue:
         callbacks.append(EventCallbackHandler(event_queue, status_messages))
 
-    # Add Langfuse callback for LLM call tracing
+    # Get Langfuse callback for LLM call tracing (passed in invoke config for SDK v3)
     langfuse_callback = _get_langfuse_callback(config)
-    if langfuse_callback:
-        callbacks.append(langfuse_callback)
+
+    # Get Langfuse metadata for session-level grouping (SDK v3)
+    langfuse_metadata = _get_langfuse_metadata(state)
 
     planner_llm = ChatOpenAI(
         model="gpt-4o-mini",  # Use faster model for planning
         api_key=state["api_key"],
         temperature=0,
-        callbacks=callbacks,
+        callbacks=callbacks,  # Frontend streaming callbacks only
     )
 
     try:
-        response = planner_llm.invoke([
-            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-            HumanMessage(content=f"Create a plan for this request: {user_message}"),
-        ])
+        # Wrap planner LLM call in span for tracing
+        with langfuse_span(config, "node:planner", metadata={"user_message": user_message[:200]}) as planner_span:
+            # Include Langfuse callback + metadata for session-level grouping (SDK v3)
+            invoke_config = {"metadata": langfuse_metadata}
+            if langfuse_callback:
+                invoke_config["callbacks"] = [langfuse_callback]
+            response = planner_llm.invoke(
+                [
+                    SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                    HumanMessage(content=f"Create a plan for this request: {user_message}"),
+                ],
+                config=invoke_config,
+            )
+            _update_span_output(config, planner_span, response.content[:500] if response.content else "")
 
         # Parse JSON response
         response_text = response.content.strip()
@@ -575,15 +702,21 @@ def tool_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
                     logger.warning(f"[TOOL_NODE] search_documents validation error: {e}")
                     query = tool_args.get("query", "")
 
-                result = executor(
-                    query=query,
-                    user_id=state["user_id"],
-                    api_key=state["api_key"],
-                )
+                # Wrap tool execution in Langfuse span for detailed tracing
+                with langfuse_span(config, f"tool:search_documents", metadata={"query": query}) as span:
+                    result = executor(
+                        query=query,
+                        user_id=state["user_id"],
+                        api_key=state["api_key"],
+                    )
+                    _update_span_output(config, span, str(result)[:500])
                 # Accumulate RAG context
                 rag_context += f"\n\n### Search: {query}\n{result}"
             else:
-                result = executor(**tool_args)
+                # Wrap other tool executions in Langfuse span
+                with langfuse_span(config, f"tool:{tool_name}", metadata={"args": tool_args}) as span:
+                    result = executor(**tool_args)
+                    _update_span_output(config, span, str(result)[:500])
 
             emit_tool_complete(config, tool_name, True)
 
@@ -724,21 +857,23 @@ def compose_report_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
             "report_summary": [f"Limited information available for {player_name}."],
         }
 
-    # Set up callbacks
+    # Set up callbacks for frontend streaming
     callbacks = []
     if event_queue:
         callbacks.append(EventCallbackHandler(event_queue, status_messages))
 
+    # Get Langfuse callback for LLM call tracing (passed in invoke config for SDK v3)
     langfuse_callback = _get_langfuse_callback(config)
-    if langfuse_callback:
-        callbacks.append(langfuse_callback)
+
+    # Get Langfuse metadata for session-level grouping (SDK v3)
+    langfuse_metadata = _get_langfuse_metadata(state)
 
     # Create LLM for composition
     composer_llm = ChatOpenAI(
         model="gpt-4o",  # Use full model for quality composition
         api_key=state["api_key"],
         temperature=0.5,  # Slightly higher for more creative writing
-        callbacks=callbacks,
+        callbacks=callbacks,  # Frontend streaming callbacks only
     )
 
     try:
@@ -752,10 +887,20 @@ Here are the search results gathered from documents:
 
 Based on this information, create a comprehensive scouting report following the JSON format specified."""
 
-        response = composer_llm.invoke([
-            SystemMessage(content=COMPOSER_SYSTEM_PROMPT),
-            HumanMessage(content=composition_prompt),
-        ])
+        # Wrap composer LLM call in span for tracing
+        with langfuse_span(config, "node:composer", metadata={"player_name": player_name, "sport": sport_guess}) as composer_span:
+            # Include Langfuse callback + metadata for session-level grouping (SDK v3)
+            invoke_config = {"metadata": langfuse_metadata}
+            if langfuse_callback:
+                invoke_config["callbacks"] = [langfuse_callback]
+            response = composer_llm.invoke(
+                [
+                    SystemMessage(content=COMPOSER_SYSTEM_PROMPT),
+                    HumanMessage(content=composition_prompt),
+                ],
+                config=invoke_config,
+            )
+            _update_span_output(config, composer_span, response.content[:500] if response.content else "")
 
         # Parse the JSON response
         response_text = response.content.strip()

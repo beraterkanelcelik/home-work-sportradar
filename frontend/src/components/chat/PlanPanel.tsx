@@ -112,7 +112,7 @@ export default function PlanPanel({
       case 'completed':
         return <Check className="w-3.5 h-3.5 text-green-500" />
       case 'in_progress':
-        return <Loader2 className="w-3.5 h-3.5 text-primary animate-spin" />
+        return <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />
       case 'error':
         return <AlertCircle className="w-3.5 h-3.5 text-destructive" />
       default:
@@ -147,7 +147,7 @@ export default function PlanPanel({
                 className={cn(
                   "w-2 h-2 rounded-full",
                   status === 'completed' && 'bg-green-500',
-                  status === 'in_progress' && 'bg-primary animate-pulse',
+                  status === 'in_progress' && 'bg-blue-500 animate-pulse',
                   status === 'error' && 'bg-destructive',
                   status === 'pending' && 'bg-muted-foreground/30'
                 )}
@@ -211,8 +211,8 @@ export default function PlanPanel({
             <span>{completedCount}/{plan.plan_total}</span>
           </div>
           <div className="w-full bg-muted rounded-full h-1.5">
-            <div 
-              className="bg-primary h-1.5 rounded-full transition-all duration-500"
+            <div
+              className="bg-blue-500 h-1.5 rounded-full transition-all duration-500"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -248,7 +248,7 @@ export default function PlanPanel({
               className={cn(
                 "p-2 rounded-md border text-xs cursor-default",
                 status === 'completed' && 'bg-green-500/5 border-green-500/20',
-                status === 'in_progress' && 'bg-primary/5 border-primary/20',
+                status === 'in_progress' && 'bg-blue-500/10 border-blue-500/30',
                 status === 'error' && 'bg-destructive/5 border-destructive/20',
                 status === 'pending' && 'bg-muted/30 border-transparent'
               )}
@@ -308,7 +308,7 @@ export default function PlanPanel({
         ) : isExecuting ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="w-3 h-3 animate-spin" />
-            <span>Executing step {(progress?.current_step_index ?? -1) + 2} of {plan.plan_total}...</span>
+            <span>Executing step {Math.min((progress?.current_step_index ?? 0) + 1, plan.plan_total)} of {plan.plan_total}...</span>
           </div>
         ) : !isApproved && onApprove && onReject ? (
           // Show approval buttons when plan is awaiting approval

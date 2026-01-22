@@ -1510,8 +1510,7 @@ async def approve_player(request):
     {
         "chat_session_id": int,
         "resume": {
-            "action": "approve" | "reject" | "edit_wording" | "edit_content",
-            "feedback": str  # optional for edit_content
+            "action": "approve" | "reject"
         }
     }
 

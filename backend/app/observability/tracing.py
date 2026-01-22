@@ -85,6 +85,10 @@ def get_callback_handler_for_user(
     Reuses the cached Langfuse client to prevent memory leaks. If a trace_id
     is provided, a new handler is created per trace to ensure correct
     association with the current trace.
+
+    Note: In Langfuse SDK v3, session_id is passed via metadata when invoking
+    the LLM, not in the CallbackHandler constructor. Use get_langfuse_metadata()
+    to get the metadata dict with session_id.
     """
     if not LANGFUSE_ENABLED:
         return None
@@ -198,6 +202,42 @@ def cleanup_all_clients():
 
         _user_langfuse_clients.clear()
         _user_callback_handlers.clear()
+
+
+def get_langfuse_metadata(
+    session_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    tags: Optional[list] = None,
+) -> Dict[str, Any]:
+    """
+    Get metadata dict for Langfuse SDK v3.
+
+    In Langfuse SDK v3, session_id and user_id are passed via metadata
+    when invoking the LLM, not in the CallbackHandler constructor.
+
+    Usage with LangChain:
+        llm.invoke(prompt, config={"metadata": get_langfuse_metadata(session_id=123)})
+
+    Args:
+        session_id: Optional session ID for session-level grouping
+        user_id: Optional user ID
+        tags: Optional list of tags
+
+    Returns:
+        Dictionary with langfuse_session_id, langfuse_user_id, langfuse_tags
+    """
+    metadata: Dict[str, Any] = {}
+
+    if session_id is not None:
+        metadata["langfuse_session_id"] = str(session_id)
+
+    if user_id is not None:
+        metadata["langfuse_user_id"] = str(user_id)
+
+    if tags:
+        metadata["langfuse_tags"] = tags
+
+    return metadata
 
 
 def prepare_trace_context(
