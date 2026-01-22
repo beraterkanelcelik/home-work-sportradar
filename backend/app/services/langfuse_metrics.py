@@ -1079,11 +1079,11 @@ def format_observations_timeline(
             if isinstance(metadata, dict):
                 activity["model"] = metadata.get("model") or metadata.get("model_name")
 
-            # Truncate input/output
+            # Send full input/output - frontend handles display/collapsing
             if input_data:
-                activity["input_preview"] = str(input_data)[:200]
+                activity["input_preview"] = str(input_data)
             if output_data:
-                activity["output_preview"] = str(output_data)[:200]
+                activity["output_preview"] = str(output_data)
 
         elif obs_type == "SPAN":
             activity["category"] = "tool_call"
@@ -1115,17 +1115,17 @@ def format_observations_timeline(
                             obs_name.split(".")[-1] if "." in obs_name else obs_name
                         )
 
-            # Add input/output preview
+            # Send full input/output - frontend handles display/collapsing
             if input_data:
-                activity["input_preview"] = str(input_data)[:200]
+                activity["input_preview"] = str(input_data)
             if output_data:
-                activity["output_preview"] = str(output_data)[:200]
+                activity["output_preview"] = str(output_data)
 
         elif obs_type == "EVENT":
             activity["category"] = "event"
             activity["name"] = obs_name or "Event"
             if input_data:
-                activity["message"] = str(input_data)[:200]
+                activity["message"] = str(input_data)
         else:
             activity["category"] = "other"
             activity["name"] = obs_name or f"{obs_type or 'Unknown'} Operation"

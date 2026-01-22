@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
 import { getErrorMessage } from '@/lib/utils'
-import logo from '@/assets/logoAPblacktransparent.png'
+import poweredBySportradar from '@/assets/powered-by-sportradar-1000w.png'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -31,12 +31,13 @@ export default function LoginPage() {
   return (
     <div className="max-w-md mx-auto px-4">
       <div className="flex flex-col items-center mb-6 sm:mb-8">
-        <img 
-          src={logo} 
-          alt="Agent Playground" 
-          className="h-16 sm:h-24 w-auto mb-4 sm:mb-5 object-contain"
+        <h1 className="brand-title brand-title-lg text-primary mb-2">Scout Agent</h1>
+        <img
+          src={poweredBySportradar}
+          alt="by Sportradar"
+          className="h-4 w-auto object-contain mb-6"
         />
-        <h1 className="text-xl sm:text-2xl font-bold">Login</h1>
+        <h2 className="text-lg sm:text-xl font-semibold">Login</h2>
       </div>
       <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5">
         {error && (

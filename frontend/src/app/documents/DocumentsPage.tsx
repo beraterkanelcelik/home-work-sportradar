@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { documentAPI, API_URL } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
@@ -157,10 +157,14 @@ export default function DocumentsPage() {
         const decoder = new TextDecoder()
         let buffer = ''
 
-        while (true) {
+        let streamActive = true
+        while (streamActive) {
           const { done, value } = await reader.read()
-          
-          if (done) break
+
+          if (done) {
+            streamActive = false
+            continue
+          }
 
           buffer += decoder.decode(value, { stream: true })
           const lines = buffer.split('\n\n')
@@ -422,7 +426,7 @@ export default function DocumentsPage() {
   }
 
   // Drag and drop handlers
-  const handleDrag = (e: DragEvent) => {
+  const handleDrag = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
     if (e.type === 'dragenter' || e.type === 'dragover') {
@@ -432,11 +436,11 @@ export default function DocumentsPage() {
     }
   }
 
-  const handleDrop = (e: DragEvent) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFileSelect(e.dataTransfer.files)
     }

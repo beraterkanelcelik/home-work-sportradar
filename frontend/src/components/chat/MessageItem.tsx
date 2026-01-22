@@ -58,10 +58,6 @@ export interface MessageItemProps {
   onApprovePlayer?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
   /** Callback when user rejects a player */
   onRejectPlayer?: (messageId: number) => void
-  /** Callback when user edits player wording */
-  onEditPlayerWording?: (messageId: number, playerPreview: PlayerPreviewData) => Promise<void>
-  /** Callback when user edits player content with feedback */
-  onEditPlayerContent?: (messageId: number, playerPreview: PlayerPreviewData, feedback: string) => Promise<void>
   /** Set of player IDs currently being approved */
   approvingPlayers?: Set<number>
   /** User email (for user avatar) */
@@ -96,8 +92,6 @@ export default function MessageItem({
   executingPlanMessageId,
   onApprovePlayer,
   onRejectPlayer,
-  onEditPlayerWording,
-  onEditPlayerContent,
   approvingPlayers,
   userEmail,
 }: MessageItemProps) {
@@ -119,6 +113,11 @@ export default function MessageItem({
   const hasClarification = message.clarification
   const hasRawToolOutputs = message.raw_tool_outputs && message.raw_tool_outputs.length > 0
   const isStatusMessage = message.role === 'system' && message.metadata?.status_type === 'task_status'
+
+  // Check if plan has completed (player was approved and saved)
+  // Don't show plan proposal message after successful completion
+  const isPlanCompleted = message.player_preview_status === 'approved' ||
+                          (message.plan_approved && message.player_preview_status === 'rejected')
 
   // Debug logging for plan proposals
   if (message.response_type === 'plan_proposal') {
@@ -184,7 +183,8 @@ export default function MessageItem({
   // Check if assistant message has content (tokens have arrived) before showing avatar/name
   const hasContent = message.content && message.content.trim().length > 0
   const hasToolCalls = message.metadata?.tool_calls && Array.isArray(message.metadata.tool_calls) && message.metadata.tool_calls.length > 0
-  const hasPlan = message.plan && message.response_type === 'plan_proposal'
+  // Don't show plan UI for completed plans (player was saved)
+  const hasPlan = message.plan && message.response_type === 'plan_proposal' && !isPlanCompleted
   const hasClarificationContent = message.clarification
   
   // Check if message only has tool calls awaiting approval (no content)
@@ -246,8 +246,6 @@ export default function MessageItem({
               preview={message.player_preview}
               onApprove={() => onApprovePlayer?.(message.id, message.player_preview!)}
               onReject={() => onRejectPlayer?.(message.id)}
-              onEditWording={() => onEditPlayerWording?.(message.id, message.player_preview!)}
-              onEditContent={(feedback) => onEditPlayerContent?.(message.id, message.player_preview!, feedback)}
               isExecuting={approvingPlayers?.has(message.id)}
               isCompleted={!!message.player_preview_status}
               completedAction={message.player_preview_status}
@@ -302,7 +300,8 @@ export default function MessageItem({
         
         {/* Message Content - only show bubble when there's actual content to display */}
         {/* For assistant messages, only show bubble if we have content, plan, or clarification */}
-        {(message.role === 'user' || (shouldShowAgentInfo && (hasContent || hasPlan || hasClarificationContent))) && (
+        {/* Hide bubble when plan is completed to avoid showing stale "Plan proposal..." text */}
+        {(message.role === 'user' || (shouldShowAgentInfo && ((hasContent && !isPlanCompleted) || hasPlan || hasClarificationContent))) && (
           <div
             className={`rounded-2xl px-4 py-3 inline-block ${
               message.role === 'user'
@@ -314,8 +313,9 @@ export default function MessageItem({
               <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
                 {message.content}
               </p>
-            ) : isPlanProposal && message.plan ? (
+            ) : isPlanProposal && message.plan && !isPlanCompleted ? (
               // Plan proposal - show simple message, full plan is in the PlanPanel
+              // Hide this message after plan is completed (player saved)
               <div className="text-sm text-muted-foreground">
                 <p className="flex items-center gap-2">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -338,8 +338,9 @@ export default function MessageItem({
                   Please provide clarification to continue.
                 </div>
               </div>
-            ) : hasContent ? (
+            ) : hasContent && !isPlanCompleted ? (
               // Regular answer rendering - only show when content exists
+              // Hide when plan is completed (player saved) to avoid showing stale "Plan proposal..." text
               <MarkdownMessage content={message.content} />
             ) : null}
           </div>

@@ -3,10 +3,11 @@
  *
  * HITL Gate B UI for scouting workflow player approval.
  * Shows extracted player fields, report summary, and full report text.
- * User can approve, reject, edit wording, or edit content.
+ * User can approve or reject the player.
  */
 
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import JsonViewer from '@/components/JsonViewer'
 
@@ -42,8 +43,6 @@ interface PlayerPreviewProps {
   preview: PlayerPreviewData
   onApprove: () => void
   onReject: () => void
-  onEditWording?: () => void
-  onEditContent?: (feedback: string) => void
   isExecuting?: boolean
   /** Whether the player has been approved/rejected (show collapsed summary) */
   isCompleted?: boolean
@@ -55,14 +54,12 @@ export default function PlayerPreview({
   preview,
   onApprove,
   onReject,
-  onEditWording,
-  onEditContent,
   isExecuting = false,
   isCompleted = false,
   completedAction,
 }: PlayerPreviewProps) {
+  const navigate = useNavigate()
   const [showFullReport, setShowFullReport] = useState(false)
-  const [feedback, setFeedback] = useState('')
 
   const { player, report_summary, report_text } = preview
 
@@ -70,17 +67,26 @@ export default function PlayerPreview({
     return sport === 'nba' ? 'NBA' : sport === 'football' ? 'Football' : 'Unknown'
   }
 
-  const handleEditContent = () => {
-    if (onEditContent && feedback.trim()) {
-      onEditContent(feedback)
-      setFeedback('')
-    }
-  }
-
   // Collapsed view for completed (approved/rejected) player previews
   if (isCompleted) {
+    const handleViewReport = () => {
+      if (completedAction === 'approved') {
+        navigate('/scout-reports')
+      }
+    }
+
     return (
-      <div className={`border rounded-lg p-3 ${completedAction === 'approved' ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'}`}>
+      <div
+        className={`border rounded-lg p-3 ${completedAction === 'approved' ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800 cursor-pointer hover:border-green-400 dark:hover:border-green-600 transition-colors' : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'}`}
+        onClick={handleViewReport}
+        role={completedAction === 'approved' ? 'button' : undefined}
+        tabIndex={completedAction === 'approved' ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (completedAction === 'approved' && (e.key === 'Enter' || e.key === ' ')) {
+            handleViewReport()
+          }
+        }}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-medium ${player.sport === 'nba' ? 'bg-blue-600' : player.sport === 'football' ? 'bg-green-600' : 'bg-gray-600'}`}>
@@ -101,7 +107,10 @@ export default function PlayerPreview({
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                Player Saved
+                <span>Player Saved</span>
+                <svg className="w-4 h-4 ml-1 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
               </>
             ) : (
               <>
@@ -113,6 +122,11 @@ export default function PlayerPreview({
             )}
           </div>
         </div>
+        {completedAction === 'approved' && (
+          <div className="text-xs text-green-600 dark:text-green-400 mt-2 text-right">
+            Click to view in Scout Reports
+          </div>
+        )}
       </div>
     )
   }
@@ -128,26 +142,6 @@ export default function PlayerPreview({
         </div>
         {!isExecuting && (
           <div className="flex gap-2">
-            {onEditWording && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onEditWording}
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-              >
-                Edit Wording
-              </Button>
-            )}
-            {onEditContent && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowFullReport(true)}
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-              >
-                Edit Content
-              </Button>
-            )}
             <Button
               variant="outline"
               size="sm"
@@ -314,41 +308,6 @@ export default function PlayerPreview({
           </div>
         )}
       </div>
-
-      {/* Edit Content Feedback */}
-      {showFullReport && onEditContent && (
-        <div className="space-y-3 pt-3 border-t">
-          <div className="text-sm font-semibold text-muted-foreground">
-            Feedback for Content Edit
-          </div>
-          <textarea
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder="Describe what additional information should be gathered..."
-            className="w-full min-h-24 rounded-md border bg-background p-2 text-sm"
-          />
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setShowFullReport(false)
-                setFeedback('')
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleEditContent}
-              disabled={!feedback.trim()}
-              className="bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              Submit & Re-run
-            </Button>
-          </div>
-        </div>
-      )}
 
       {!isExecuting && (
         <div className="text-xs text-muted-foreground pt-2 border-t">

@@ -1000,6 +1000,45 @@ async def approve_plan(request):
             f"[PLAN_HITL] [RESUME] Plan approval request: user={user.id} session={chat_session_id} approved={approved}"
         )
 
+        # Persist plan_approved status to the message metadata
+        # This ensures the approval status survives page refresh
+        try:
+            from app.db.models.message import Message
+
+            @sync_to_async
+            def update_plan_message():
+                # Find the most recent message with a plan proposal
+                messages = Message.objects.filter(
+                    session_id=chat_session_id,
+                    role="assistant",
+                ).order_by("-created_at")[:5]
+
+                for message in messages:
+                    if message.metadata and (
+                        message.metadata.get("response_type") == "plan_proposal" or
+                        message.metadata.get("plan")
+                    ):
+                        # Update the metadata with the approval status
+                        message.metadata["plan_approved"] = approved
+                        message.save(update_fields=["metadata"])
+                        logger.info(
+                            f"[PLAN_HITL] Updated message {message.id} with plan_approved={approved}"
+                        )
+                        return True
+                return False
+
+            updated = await update_plan_message()
+            if not updated:
+                logger.warning(
+                    f"[PLAN_HITL] Could not find plan message to update for session={chat_session_id}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[PLAN_HITL] Failed to persist plan_approved status: {e}",
+                exc_info=True,
+            )
+            # Don't fail the request - workflow will still process
+
         # Send resume signal to Temporal workflow
         try:
             from app.core.temporal import get_temporal_client
@@ -1471,8 +1510,7 @@ async def approve_player(request):
     {
         "chat_session_id": int,
         "resume": {
-            "action": "approve" | "reject" | "edit_wording" | "edit_content",
-            "feedback": str  # optional for edit_content
+            "action": "approve" | "reject"
         }
     }
 

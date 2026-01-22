@@ -81,7 +81,7 @@ export default function PlanProposal({
       case 'completed':
         return <Check className="w-4 h-4 text-green-500" />
       case 'in_progress':
-        return <Loader2 className="w-4 h-4 text-primary animate-spin" />
+        return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
       case 'error':
         return <Circle className="w-4 h-4 text-destructive fill-destructive" />
       default:
@@ -94,7 +94,7 @@ export default function PlanProposal({
       case 'completed':
         return 'bg-green-500/10 border-green-500/20'
       case 'in_progress':
-        return 'bg-primary/10 border-primary/20'
+        return 'bg-blue-500/10 border-blue-500/30'
       case 'error':
         return 'bg-destructive/10 border-destructive/20'
       default:
@@ -180,8 +180,8 @@ export default function PlanProposal({
       {/* Progress bar during execution */}
       {isExecuting && (
         <div className="w-full bg-muted rounded-full h-2">
-          <div 
-            className="bg-primary h-2 rounded-full transition-all duration-500"
+          <div
+            className="bg-blue-500 h-2 rounded-full transition-all duration-500"
             style={{ width: `${progressPercent}%` }}
           />
         </div>
@@ -220,7 +220,7 @@ export default function PlanProposal({
                 <div className={cn(
                   "w-6 h-6 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0",
                   status === 'completed' ? 'bg-green-500/20 text-green-600' :
-                  status === 'in_progress' ? 'bg-primary/20 text-primary' :
+                  status === 'in_progress' ? 'bg-blue-500/20 text-blue-600' :
                   'bg-muted text-muted-foreground'
                 )}>
                   {index + 1}

@@ -30,6 +30,7 @@ declare module 'react' {
   export function useEffect(fn: () => void | (() => void), deps?: any[]): void
   export function useRef<T>(initial: T): { current: T }
   export function useCallback<T extends (...args: any[]) => any>(fn: T, deps?: any[]): T
+  export function useMemo<T>(factory: () => T, deps: any[]): T
   export function forwardRef<T, P = {}>(render: (props: P, ref: Ref<T>) => ReactElement | null): (props: P & RefAttributes<T>) => ReactElement | null
   export const StrictMode: React.ComponentType<{ children?: React.ReactNode }>
   export const Fragment: React.ComponentType<{ children?: React.ReactNode }>
@@ -62,6 +63,7 @@ declare module 'react' {
     useEffect: (fn: () => void | (() => void), deps?: any[]) => void
     useRef: <T>(initial: T) => { current: T }
     useCallback: <T extends (...args: any[]) => any>(fn: T, deps?: any[]) => T
+    useMemo: <T>(factory: () => T, deps: any[]) => T
     forwardRef: <T, P = {}>(render: (props: P, ref: Ref<T>) => ReactElement | null) => ((props: P & RefAttributes<T>) => ReactElement | null) & { displayName?: string }
     StrictMode: React.ComponentType<{ children?: React.ReactNode }>
     Fragment: React.ComponentType<{ children?: React.ReactNode }>

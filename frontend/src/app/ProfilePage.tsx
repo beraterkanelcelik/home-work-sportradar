@@ -11,29 +11,6 @@ interface UserProfile {
   first_name: string
   last_name: string
   created_at: string
-  token_usage_count: number
-}
-
-interface TokenStats {
-  total_tokens: number
-  input_tokens: number
-  output_tokens: number
-  cached_tokens: number
-  tokens_this_month: number
-  input_tokens_this_month: number
-  output_tokens_this_month: number
-  tokens_last_30_days: number
-  input_tokens_last_30_days: number
-  output_tokens_last_30_days: number
-  total_cost: number
-  cost_this_month: number
-  cost_last_30_days: number
-  agent_usage: Record<string, number>
-  tool_usage: Record<string, number>
-  total_sessions: number
-  sessions_this_month: number
-  sessions_last_30_days: number
-  account_created: string
 }
 
 interface ApiKeyStatus {
@@ -49,7 +26,6 @@ interface ApiKeyStatus {
 
 export default function ProfilePage() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
-  const [stats, setStats] = useState<TokenStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(false)
   const [firstName, setFirstName] = useState('')
@@ -87,7 +63,6 @@ export default function ProfilePage() {
 
   useEffect(() => {
     loadProfile()
-    loadStats()
     loadApiKeyStatus()
   }, [])
 
@@ -102,15 +77,6 @@ export default function ProfilePage() {
       toast.error(getErrorMessage(error, 'Failed to load profile'))
     } finally {
       setLoading(false)
-    }
-  }
-
-  const loadStats = async () => {
-    try {
-      const response = await userAPI.getUserStats()
-      setStats(response.data)
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, 'Failed to load stats'))
     }
   }
 
@@ -237,37 +203,6 @@ export default function ProfilePage() {
   return (
     <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6">
       <h1 className="text-2xl sm:text-3xl font-bold">Profile</h1>
-
-      {/* Token Usage Section */}
-      {stats && (
-        <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">
-          <h2 className="text-lg sm:text-xl font-semibold mb-4">Token Usage</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
-            <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Total Tokens</label>
-              <p className="text-xl sm:text-2xl font-bold">{stats.total_tokens.toLocaleString()}</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Input Tokens</label>
-              <p className="text-xl sm:text-2xl font-bold">{stats.input_tokens.toLocaleString()}</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Output Tokens</label>
-              <p className="text-xl sm:text-2xl font-bold">{stats.output_tokens.toLocaleString()}</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Cached Tokens</label>
-              <p className="text-xl sm:text-2xl font-bold">{stats.cached_tokens.toLocaleString()}</p>
-            </div>
-          </div>
-          {stats.total_cost > 0 && (
-            <div className="mt-4 sm:mt-6 pt-4 sm:pt-6 border-t">
-              <label className="text-sm font-medium text-muted-foreground block mb-1">Total Cost</label>
-              <p className="text-2xl sm:text-3xl font-bold">${stats.total_cost.toFixed(4)}</p>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Basic Information Section */}
       <div className="border rounded-lg p-4 sm:p-6 hover:bg-muted/50 transition-colors">

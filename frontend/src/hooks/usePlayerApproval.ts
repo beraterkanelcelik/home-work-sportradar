@@ -2,7 +2,7 @@
  * usePlayerApproval Hook
  *
  * Manages player approval logic for scouting workflow HITL Gate B.
- * Similar to useToolApproval but for player approval with 4 actions.
+ * Handles approve and reject actions for player previews.
  */
 
 import { useState, useCallback } from 'react'
@@ -15,7 +15,7 @@ export interface PlayerPreviewData {
   player: Record<string, any>
   report_summary: string[]
   report_text: string
-  db_payload_preview: Record<string, any>
+  db_payload_preview?: Record<string, any>
 }
 
 interface UsePlayerApprovalProps {
@@ -148,122 +148,9 @@ export function usePlayerApproval({
     }
   }, [currentSession, approvingPlayers])
 
-  /**
-   * Edit wording - re-run compose only
-   */
-  const handleEditWording = useCallback(async (
-    messageId: number,
-    playerPreview: PlayerPreviewData
-  ) => {
-    if (!currentSession) {
-      toast.error('No active session')
-      return
-    }
-
-    if (approvingPlayers.has(messageId)) {
-      return
-    }
-
-    console.log(`[PLAYER_APPROVAL] User requested edit wording: message=${messageId}`)
-
-    setApprovingPlayers(prev => new Set(prev).add(messageId))
-
-    try {
-      const response = await agentAPI.approvePlayer({
-        chat_session_id: currentSession.id,
-        resume: {
-          action: 'edit_wording'
-        }
-      })
-
-      if (response.data.success) {
-        toast.success('Re-running report composition...')
-        console.log(`[PLAYER_APPROVAL] Edit wording initiated: message=${messageId}`)
-        
-        // Open resume stream to receive new player preview
-        if (onResumeStream) {
-          console.log(`[PLAYER_APPROVAL] Triggering resume stream for edit wording`)
-          onResumeStream()
-        }
-      } else {
-        toast.error(response.data.error || 'Failed to edit wording')
-      }
-    } catch (error: any) {
-      console.error(`[PLAYER_APPROVAL] Error editing wording:`, error, `session=${currentSession?.id}`)
-      toast.error(getErrorMessage(error, 'Failed to edit wording'))
-    } finally {
-      setApprovingPlayers(prev => {
-        const next = new Set(prev)
-        next.delete(messageId)
-        return next
-      })
-    }
-  }, [currentSession, approvingPlayers, onResumeStream])
-
-  /**
-   * Edit content - re-run from build_queries with feedback
-   */
-  const handleEditContent = useCallback(async (
-    messageId: number,
-    playerPreview: PlayerPreviewData,
-    feedback: string
-  ) => {
-    if (!currentSession) {
-      toast.error('No active session')
-      return
-    }
-
-    if (approvingPlayers.has(messageId)) {
-      return
-    }
-
-    if (!feedback.trim()) {
-      toast.error('Please provide feedback for content edit')
-      return
-    }
-
-    console.log(`[PLAYER_APPROVAL] User requested edit content: message=${messageId} feedback=${feedback}`)
-
-    setApprovingPlayers(prev => new Set(prev).add(messageId))
-
-    try {
-      const response = await agentAPI.approvePlayer({
-        chat_session_id: currentSession.id,
-        resume: {
-          action: 'edit_content',
-          feedback: feedback
-        }
-      })
-
-      if (response.data.success) {
-        toast.success('Re-running evidence retrieval with new hints...')
-        console.log(`[PLAYER_APPROVAL] Edit content initiated: message=${messageId}`)
-        
-        // Open resume stream to receive new player preview
-        if (onResumeStream) {
-          console.log(`[PLAYER_APPROVAL] Triggering resume stream for edit content`)
-          onResumeStream()
-        }
-      } else {
-        toast.error(response.data.error || 'Failed to edit content')
-      }
-    } catch (error: any) {
-      console.error(`[PLAYER_APPROVAL] Error editing content:`, error, `session=${currentSession?.id}`)
-      toast.error(getErrorMessage(error, 'Failed to edit content'))
-    } finally {
-      setApprovingPlayers(prev => {
-        const next = new Set(prev)
-        next.delete(messageId)
-        return next
-      })
-    }
-  }, [currentSession, approvingPlayers, onResumeStream])
-
   return {
     handleApprovePlayer,
     handleRejectPlayer,
-    handleEditWording,
-    handleEditContent,
     approvingPlayers,
   }
 }

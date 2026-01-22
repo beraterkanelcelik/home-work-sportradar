@@ -4,6 +4,7 @@ declare module 'react' {
   export function useEffect(fn: () => void | (() => void), deps?: any[]): void
   export function useRef<T>(initial: T): { current: T }
   export function useCallback<T extends (...args: any[]) => any>(fn: T, deps?: any[]): T
+  export function useMemo<T>(factory: () => T, deps: any[]): T
   export function forwardRef<T, P = {}>(render: (props: P, ref: React.Ref<T>) => React.ReactElement | null): ((props: P & React.RefAttributes<T>) => React.ReactElement | null) & { displayName?: string }
   export const StrictMode: any
   export const Fragment: any
