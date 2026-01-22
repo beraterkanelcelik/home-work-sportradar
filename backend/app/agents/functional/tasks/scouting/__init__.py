@@ -29,6 +29,7 @@ from .composition import compose_report
 from .preview import prepare_preview
 from .write import write_player_item
 from .response import build_final_response
+from .answer import generate_answer
 
 __all__ = [
     # New dynamic plan
@@ -39,6 +40,7 @@ __all__ = [
     "compose_report",
     "write_player_item",
     "build_final_response",
+    "generate_answer",
     # Legacy (deprecated)
     "intake_and_route_scouting",
     "draft_plan",

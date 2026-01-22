@@ -798,6 +798,28 @@ export default function ChatPage() {
                 })
               }
               } // End of if (progressData.total_steps > 0)
+            } else if (eventType === 'context_usage') {
+              // Handle context usage event - update message with token usage info for header display
+              const usageData = event.data || {}
+              console.log(`[FRONTEND] [CONTEXT_USAGE] Tokens: ${usageData.total_tokens}/${usageData.context_window} (${usageData.usage_percentage}%)`)
+
+              set((state: { messages: Message[] }) => {
+                return {
+                  messages: state.messages.map((msg: Message) =>
+                    msg.id === assistantMessageId
+                      ? {
+                          ...msg,
+                          context_usage: {
+                            total_tokens: usageData.total_tokens || 0,
+                            context_window: usageData.context_window || 128000,
+                            usage_percentage: usageData.usage_percentage || 0,
+                            tokens_remaining: usageData.tokens_remaining || 128000,
+                          }
+                        }
+                      : msg
+                  ),
+                }
+              })
             } else if (eventType === 'error') {
               const errorData = event.data || {}
               const duration = Date.now() - streamStartTime
@@ -1531,7 +1553,8 @@ export default function ChatPage() {
           }
         } else if (eventType === 'token') {
           // Handle streaming tokens (for final answer)
-          const token = event.data?.token || event.data?.content || ''
+          // Backend sends: {"type": "token", "data": "token string"}
+          const token = typeof event.data === 'string' ? event.data : (event.data?.token || event.data?.content || '')
           if (token) {
             set((state: { messages: Message[] }) => ({
               messages: state.messages.map((msg: Message) =>
@@ -1541,6 +1564,26 @@ export default function ChatPage() {
               ),
             }))
           }
+        } else if (eventType === 'context_usage') {
+          // Handle context usage event - update message with token usage info for header display
+          const usageData = event.data || {}
+          console.log(`[RESUME_STREAM] [CONTEXT_USAGE] Tokens: ${usageData.total_tokens}/${usageData.context_window} (${usageData.usage_percentage}%)`)
+
+          set((state: { messages: Message[] }) => ({
+            messages: state.messages.map((msg: Message) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    context_usage: {
+                      total_tokens: usageData.total_tokens || 0,
+                      context_window: usageData.context_window || 128000,
+                      usage_percentage: usageData.usage_percentage || 0,
+                      tokens_remaining: usageData.tokens_remaining || 128000,
+                    }
+                  }
+                : msg
+            ),
+          }))
         } else if (eventType === 'message_saved') {
           // Update message with real DB id
           const savedData = event.data || {}

@@ -45,6 +45,7 @@ from app.agents.functional.tasks.scouting import (
     prepare_preview,
     write_player_item,
     build_final_response,
+    generate_answer,
 )
 from app.agents.functional.tasks.supervisor import route_to_agent
 from app.agents.functional.tasks.agent import execute_agent, refine_with_tool_results
@@ -645,10 +646,73 @@ def execute_answer_step(
     state: WorkflowState,
     config: Optional[RunnableConfig],
 ) -> Dict[str, Any]:
-    """Execute an answer step - generates final response."""
+    """
+    Execute an answer step - generates final response from RAG context + chat history.
+
+    This step:
+    1. Loads chat history (excluding system messages)
+    2. Calls LLM with accumulated RAG context + history
+    3. Streams tokens back to frontend via event queue
+    4. Emits context_usage event for frontend display
+
+    For general_chat (no RAG context), the LLM uses chat history to respond.
+    For info_query (with RAG context), the LLM synthesizes an answer from documents.
+    """
     logger.info("[WORKFLOW] Executing answer step")
-    # Answer generation happens after plan execution
-    return {"success": True}
+
+    # Load chat history from session (excluding system messages)
+    chat_history = []
+    if state.session_id:
+        try:
+            from app.services.chat_service import get_messages
+
+            messages = get_messages(state.session_id, for_llm=True)
+            for msg in messages:
+                # Exclude system messages from history
+                if msg.role in ("user", "assistant"):
+                    chat_history.append({
+                        "role": msg.role,
+                        "content": msg.content,
+                    })
+
+            # Limit history to last 10 messages to avoid context overflow
+            chat_history = chat_history[-10:]
+            logger.info(f"[WORKFLOW] Loaded {len(chat_history)} messages for answer context")
+        except Exception as e:
+            logger.warning(f"[WORKFLOW] Failed to load chat history: {e}")
+
+    # Determine if this is a RAG query or general chat
+    has_rag_context = bool(state.answer_context.strip())
+    intent = state.plan.intent if state.plan else "general_chat"
+
+    logger.info(f"[WORKFLOW] Answer step: intent={intent}, has_rag_context={has_rag_context}, history_len={len(chat_history)}")
+
+    # Get event queue for streaming
+    event_queue = get_event_queue_from_config(config) if config else None
+
+    # Generate answer with streaming (returns tuple of answer, context_usage)
+    answer, context_usage = generate_answer(
+        question=state.message,
+        context=state.answer_context if has_rag_context else "",
+        chat_history=chat_history,
+        api_key=state.api_key,
+        event_queue=event_queue,
+        is_general_chat=(intent == "general_chat"),
+    ).result()
+
+    # Emit context_usage event for frontend
+    emit_workflow_event(
+        config,
+        "context_usage",
+        context_usage,
+    )
+
+    # Store the generated answer in state for final response
+    state.answer_context = answer
+
+    logger.info(f"[WORKFLOW] Generated answer: {len(answer)} chars")
+
+    return {"success": True, "answer_length": len(answer), "context_usage": context_usage}
 
 
 # ============================================================================
@@ -842,11 +906,10 @@ def generate_final_response(state: WorkflowState) -> AgentResponse:
 
     elif intent == "info_query":
         if state.answer_context:
-            # Use LLM to synthesize answer from context
-            # For now, return the raw context
+            # answer_context now contains the LLM-generated answer from execute_answer_step
             return AgentResponse(
                 type="answer",
-                reply=f"Based on the documents I found:\n{state.answer_context}",
+                reply=state.answer_context,
                 agent_name="search",
             )
         else:
@@ -871,12 +934,19 @@ def generate_final_response(state: WorkflowState) -> AgentResponse:
             )
 
     else:
-        # general_chat
-        return AgentResponse(
-            type="answer",
-            reply="How can I help you with scouting today?",
-            agent_name="greeter",
-        )
+        # general_chat - use the generated answer from execute_answer_step
+        if state.answer_context:
+            return AgentResponse(
+                type="answer",
+                reply=state.answer_context,
+                agent_name="assistant",
+            )
+        else:
+            return AgentResponse(
+                type="answer",
+                reply="How can I help you with scouting today?",
+                agent_name="greeter",
+            )
 
 
 # ============================================================================
