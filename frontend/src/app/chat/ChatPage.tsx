@@ -1643,14 +1643,37 @@ export default function ChatPage() {
           // Stream will close on interrupt, which is expected behavior
           // DON'T reload messages here - we have the data we need and loadMessages would clear temp messages
         } else if (eventType === 'final' || eventType === 'done') {
-          console.log(`[RESUME_STREAM] Stream finished with ${eventType}`)
+          console.log(`[RESUME_STREAM] Stream finished with ${eventType}`, event.data)
+          
           // Mark plan as completed
           setCompletedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
           setApprovedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
           setPlanPanelCollapsed(true)
           setExecutingPlanMessageId(null)
-          // Reload messages to get final state from DB
-          loadMessages(currentSession.id)
+          
+          // Extract final response and update message content (if any)
+          const finalResponse = event.data?.response || event.data
+          if (finalResponse?.reply) {
+            set((state: { messages: Message[] }) => ({
+              messages: state.messages.map((msg: Message) =>
+                msg.id === assistantMessageId
+                  ? { 
+                      ...msg, 
+                      content: finalResponse.reply,
+                      response_type: 'answer',
+                      // Mark player preview as saved if workflow completed successfully
+                      player_preview_status: msg.player_preview ? 'approved' as const : undefined
+                    }
+                  : msg
+              ),
+            }))
+          }
+          
+          // Show success toast
+          toast.success('Report saved successfully')
+          
+          // DON'T call loadMessages() - we have all the data we need
+          // User can refresh if they want fresh DB state
         } else if (eventType === 'error') {
           console.error(`[RESUME_STREAM] Error event:`, event.data)
           toast.error(event.data?.error || 'Error during plan execution')
@@ -1664,11 +1687,10 @@ export default function ChatPage() {
       },
       () => {
         console.log(`[RESUME_STREAM] Stream complete, receivedPlayerApproval=${receivedPlayerApproval}`)
-        // Only reload messages if we didn't receive a player approval interrupt
-        // If we received player approval, loading messages would clear the temp player preview message
-        // The player preview is already saved to the backend via savePlayerPreview()
-        if (currentSession && !receivedPlayerApproval) {
-          loadMessages(currentSession.id)
+        // Stream closed - clean up state
+        // DON'T call loadMessages() - causes unnecessary refresh
+        // All state updates happen via streaming events
+        if (!receivedPlayerApproval) {
           setExecutingPlanMessageId(null)
         }
         // If we received player approval, DON'T clear executingPlanMessageId
@@ -1677,7 +1699,7 @@ export default function ChatPage() {
     )
 
     resumeStreamRef.current = resumeStream
-  }, [currentSession, executingPlanMessageId, set, loadMessages, updatePlanProgress, savePlayerPreview, setCompletedPlanMessageIds, setApprovedPlanMessageIds])
+  }, [currentSession, executingPlanMessageId, set, updatePlanProgress, savePlayerPreview, setCompletedPlanMessageIds, setApprovedPlanMessageIds])
 
   // Tool Approval Hook
   // Location: frontend/src/hooks/useToolApproval.ts
@@ -1723,7 +1745,6 @@ export default function ChatPage() {
     updateMessages: (updater) => {
       set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
     },
-    loadMessages,
     onResumeStream: handleResumeStream,
   })
   
@@ -1750,7 +1771,31 @@ export default function ChatPage() {
     
     // Check if this plan has been approved or completed
     const isApproved = approvedPlanMessageIds.has(planMessage.id)
-    const isCompleted = completedPlanMessageIds.has(planMessage.id)
+    
+    // Check completion via ID set OR via progress data
+    // We check progress data because after loadMessages(), the message gets a new DB ID
+    // but completedPlanMessageIds might have the old temp ID
+    let isCompleted = completedPlanMessageIds.has(planMessage.id)
+    
+    // Fallback: Check if all steps are completed via progress data
+    if (!isCompleted && planMessage.plan_progress && planMessage.plan?.plan_total) {
+      const progress = planMessage.plan_progress
+      const totalSteps = planMessage.plan.plan_total
+      
+      // Check if we have progress data showing all steps completed
+      if (progress.steps_status) {
+        const completedCount = Object.values(progress.steps_status).filter(
+          (s: any) => s.status === 'completed'
+        ).length
+        
+        if (completedCount >= totalSteps) {
+          isCompleted = true
+          // Optionally sync to the Set so future checks don't re-compute
+          // setCompletedPlanMessageIds(prev => new Set(prev).add(planMessage.id))
+        }
+      }
+    }
+    
     const isExecuting = !!executingPlanMessageId && planMessage.id === executingPlanMessageId
     
     return {

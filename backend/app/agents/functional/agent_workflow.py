@@ -127,6 +127,70 @@ def check_user_has_documents(user_id: int) -> bool:
         return False
 
 
+def save_completed_steps_to_session(
+    session_id: int, completed_steps: List[int]
+) -> None:
+    """
+    Save completed step indices to session metadata.
+
+    This persists the workflow progress across HITL interrupts.
+    Without this, resuming after Gate B would re-run all steps.
+    """
+    try:
+        from app.db.models.session import ChatSession
+
+        session = ChatSession.objects.get(id=session_id)
+        if session.metadata is None:
+            session.metadata = {}
+        session.metadata["completed_steps"] = completed_steps
+        session.save(update_fields=["metadata"])
+        logger.info(
+            f"[WORKFLOW] Saved completed_steps to session {session_id}: {completed_steps}"
+        )
+    except Exception as e:
+        logger.warning(f"[WORKFLOW] Failed to save completed_steps: {e}")
+
+
+def load_completed_steps_from_session(session_id: int) -> List[int]:
+    """
+    Load completed step indices from session metadata.
+
+    Returns empty list if no completed steps are stored.
+    """
+    try:
+        from app.db.models.session import ChatSession
+
+        session = ChatSession.objects.get(id=session_id)
+        if session.metadata and "completed_steps" in session.metadata:
+            steps = session.metadata["completed_steps"]
+            logger.info(
+                f"[WORKFLOW] Loaded completed_steps from session {session_id}: {steps}"
+            )
+            return steps
+        return []
+    except Exception as e:
+        logger.warning(f"[WORKFLOW] Failed to load completed_steps: {e}")
+        return []
+
+
+def clear_completed_steps_from_session(session_id: int) -> None:
+    """
+    Clear completed step indices from session metadata.
+
+    Called when workflow completes successfully.
+    """
+    try:
+        from app.db.models.session import ChatSession
+
+        session = ChatSession.objects.get(id=session_id)
+        if session.metadata and "completed_steps" in session.metadata:
+            del session.metadata["completed_steps"]
+            session.save(update_fields=["metadata"])
+            logger.info(f"[WORKFLOW] Cleared completed_steps from session {session_id}")
+    except Exception as e:
+        logger.warning(f"[WORKFLOW] Failed to clear completed_steps: {e}")
+
+
 def request_plan_approval(
     plan: ExecutionPlan,
     session_id: int,
@@ -447,10 +511,23 @@ def execute_plan_steps(
     This is important for resume after HITL Gate B - we don't want to re-run
     steps 1-6 when resuming from step 7.
 
+    Completed steps are persisted to session metadata so they survive across
+    HITL interrupts (state object is recreated on each workflow invocation).
+
     Returns list of step results.
     """
     if not state.plan:
         return []
+
+    # Load previously completed steps from database (for resume scenarios)
+    # This is critical because WorkflowState is recreated fresh on each invocation
+    if not state.completed_steps and state.session_id:
+        stored_steps = load_completed_steps_from_session(state.session_id)
+        if stored_steps:
+            state.completed_steps = stored_steps
+            logger.info(
+                f"[WORKFLOW] Restored completed_steps from session: {stored_steps}"
+            )
 
     step_results = []
     total_steps = len(state.plan.steps)
@@ -514,6 +591,10 @@ def execute_plan_steps(
             # Mark step as completed (important for resume after HITL gates)
             state.completed_steps.append(idx)
 
+            # Persist to database so it survives HITL interrupts
+            if state.session_id:
+                save_completed_steps_to_session(state.session_id, state.completed_steps)
+
             # Emit step complete
             emit_workflow_event(
                 config,
@@ -528,6 +609,13 @@ def execute_plan_steps(
             )
 
         except GraphInterrupt:
+            # Save progress before interrupt so resume knows where we were
+            # This is critical - without this, resume would re-run all steps
+            if state.session_id:
+                save_completed_steps_to_session(state.session_id, state.completed_steps)
+                logger.info(
+                    f"[WORKFLOW] Saved progress before interrupt: completed_steps={state.completed_steps}"
+                )
             # Re-raise GraphInterrupt so HITL gates work properly
             # This allows save_player step to pause for player approval
             raise
@@ -552,6 +640,10 @@ def execute_plan_steps(
                     "error": str(e),
                 },
             )
+
+    # Clear completed_steps from session when workflow completes successfully
+    if state.session_id:
+        clear_completed_steps_from_session(state.session_id)
 
     return step_results
 

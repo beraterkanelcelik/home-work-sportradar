@@ -21,7 +21,6 @@ export interface PlayerPreviewData {
 interface UsePlayerApprovalProps {
   currentSession: { id: number } | null
   updateMessages: (updater: (messages: Message[]) => Message[]) => void
-  loadMessages: (sessionId: number) => Promise<void>
   /** Callback to open a new SSE stream after approval to receive execution events.
    *  Accepts optional planMessageId for consistency with plan approval.
    */
@@ -31,7 +30,6 @@ interface UsePlayerApprovalProps {
 export function usePlayerApproval({
   currentSession,
   updateMessages,
-  loadMessages,
   onResumeStream,
 }: UsePlayerApprovalProps) {
   const [approvingPlayers, setApprovingPlayers] = useState<Set<number>>(new Set())
@@ -82,10 +80,8 @@ export function usePlayerApproval({
         if (onResumeStream) {
           console.log(`[PLAYER_APPROVAL] Triggering resume stream`)
           onResumeStream()
-        } else {
-          // Fallback: reload messages to get saved player
-          await loadMessages(currentSession.id)
         }
+        // No fallback loadMessages - stream handles all updates
       } else {
         toast.error(response.data.error || 'Player approval failed')
       }
@@ -99,7 +95,7 @@ export function usePlayerApproval({
         return next
       })
     }
-  }, [currentSession, updateMessages, loadMessages, approvingPlayers, onResumeStream])
+  }, [currentSession, updateMessages, approvingPlayers, onResumeStream])
 
   /**
    * Reject player proposal
