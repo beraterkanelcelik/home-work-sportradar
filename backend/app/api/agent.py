@@ -27,6 +27,53 @@ from app.settings import (
 logger = get_logger(__name__)
 
 
+def _format_sse_event(event: dict) -> str:
+    """Format event dict as SSE data line."""
+    if isinstance(event, dict):
+        event_type = event.get("type")
+
+        # Transform token events: "value" -> "data"
+        if event_type == "token" and "value" in event and "data" not in event:
+            event["data"] = event.pop("value")
+
+        # Transform final events to done events for frontend compatibility
+        elif event_type == "final":
+            if "response" in event:
+                response = event["response"]
+                # Serialize AgentResponse if needed
+                if hasattr(response, "model_dump"):  # Pydantic v2
+                    response = response.model_dump()
+                elif hasattr(response, "dict"):  # Pydantic v1
+                    response = response.dict()
+
+                # Format as done event with data
+                if isinstance(response, dict):
+                    event["type"] = "done"
+                    event["data"] = {
+                        "tokens_used": response.get("token_usage", {}).get(
+                            "total_tokens", 0
+                        ),
+                        "raw_tool_outputs": response.get("raw_tool_outputs"),
+                        "agent": response.get("agent_name"),
+                        "tool_calls": response.get("tool_calls", []),
+                        "context_usage": response.get("context_usage"),
+                    }
+                    # Remove response field as it's now in data
+                    event.pop("response", None)
+                else:
+                    event["data"] = response
+
+        # Ensure AgentResponse objects are serialized for other event types
+        elif "response" in event:
+            response = event["response"]
+            if hasattr(response, "model_dump"):  # Pydantic v2
+                event["response"] = response.model_dump()
+            elif hasattr(response, "dict"):  # Pydantic v1
+                event["response"] = response.dict()
+
+    return f"data: {json.dumps(event, default=str)}\n\n"
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 async def stream_agent(request):
@@ -253,13 +300,11 @@ async def stream_agent(request):
                             return
 
                         # Listen to Redis messages with timeout handling and reconnection
-                        # Scalability: Use shorter timeout for approval waiting (5 min) vs normal streaming (10 min)
-                        # This prevents long-lived connections from consuming server resources
+                        # Scalability: Stream timeout for normal streaming (10 min)
+                        # Interrupt events now close the stream immediately, frontend reconnects after approval
                         timeout_seconds = STREAM_TIMEOUT_SECONDS
-                        interrupt_wait_timeout = 300  # 5 minutes max when waiting for interrupt resume (can be externalized later)
                         loop = asyncio.get_running_loop()
                         start_time = loop.time()
-                        waiting_for_resume = False
                         last_heartbeat_time = start_time
                         heartbeat_interval = SSE_HEARTBEAT_SECONDS
 
@@ -304,21 +349,16 @@ async def stream_agent(request):
                                         current_time = loop.time()
                                         elapsed = current_time - start_time
 
-                                        # Check timeout based on whether we're waiting for interrupt resume
-                                        max_timeout = (
-                                            interrupt_wait_timeout
-                                            if waiting_for_resume
-                                            else timeout_seconds
-                                        )
-                                        if elapsed > max_timeout:
+                                        # Check timeout
+                                        if elapsed > timeout_seconds:
                                             logger.warning(
-                                                f"Redis subscription timeout after {max_timeout}s for channel {channel} (waiting_for_resume={waiting_for_resume})"
+                                                f"Redis subscription timeout after {timeout_seconds}s for channel {channel}"
                                             )
                                             yield _format_sse_event(
                                                 {
                                                     "type": "error",
                                                     "data": {
-                                                        "error": f"Subscription timeout after {max_timeout}s"
+                                                        "error": f"Subscription timeout after {timeout_seconds}s"
                                                     },
                                                 }
                                             )
@@ -361,15 +401,14 @@ async def stream_agent(request):
                                                 yield _format_sse_event(event_data)
                                                 event_type = event_data.get("type")
 
-                                                # Track if we're waiting for interrupt resume (affects timeout)
+                                                # Close SSE on interrupt - frontend will open new stream after approval
+                                                # This is more efficient than keeping connection open for minutes
                                                 if event_type == "interrupt":
-                                                    waiting_for_resume = True
                                                     logger.info(
-                                                        f"[HITL] [SSE] Received interrupt event, connection will timeout after {interrupt_wait_timeout}s if no resume session={chat_session_id}"
+                                                        f"[HITL] [SSE] Received interrupt event, closing SSE connection. Frontend should open new stream after approval. session={chat_session_id}"
                                                     )
-                                                    # Don't break - keep connection open but with shorter timeout
-                                                    # This balances scalability (timeout) with UX (no reconnection needed)
-                                                    continue
+                                                    # Break to close connection - frontend will reconnect after approval
+                                                    break
                                                 elif event_type in [
                                                     "final",
                                                     "error",
@@ -613,52 +652,6 @@ async def stream_agent(request):
                         logger.debug(
                             f"Error cleaning up Redis pubsub (non-critical): {e}"
                         )
-
-        def _format_sse_event(event: dict) -> str:
-            """Format event dict as SSE data line."""
-            if isinstance(event, dict):
-                event_type = event.get("type")
-
-                # Transform token events: "value" -> "data"
-                if event_type == "token" and "value" in event and "data" not in event:
-                    event["data"] = event.pop("value")
-
-                # Transform final events to done events for frontend compatibility
-                elif event_type == "final":
-                    if "response" in event:
-                        response = event["response"]
-                        # Serialize AgentResponse if needed
-                        if hasattr(response, "model_dump"):  # Pydantic v2
-                            response = response.model_dump()
-                        elif hasattr(response, "dict"):  # Pydantic v1
-                            response = response.dict()
-
-                        # Format as done event with data
-                        if isinstance(response, dict):
-                            event["type"] = "done"
-                            event["data"] = {
-                                "tokens_used": response.get("token_usage", {}).get(
-                                    "total_tokens", 0
-                                ),
-                                "raw_tool_outputs": response.get("raw_tool_outputs"),
-                                "agent": response.get("agent_name"),
-                                "tool_calls": response.get("tool_calls", []),
-                                "context_usage": response.get("context_usage"),
-                            }
-                            # Remove response field as it's now in data
-                            event.pop("response", None)
-                        else:
-                            event["data"] = response
-
-                # Ensure AgentResponse objects are serialized for other event types
-                elif "response" in event:
-                    response = event["response"]
-                    if hasattr(response, "model_dump"):  # Pydantic v2
-                        event["response"] = response.model_dump()
-                    elif hasattr(response, "dict"):  # Pydantic v1
-                        event["response"] = response.dict()
-
-            return f"data: {json.dumps(event, default=str)}\n\n"
 
         # Emit initial event with metadata about disconnect behavior
         # Note: This will be the first event in the stream
@@ -1082,6 +1075,147 @@ async def approve_plan(request):
 
 @csrf_exempt
 @require_http_methods(["GET"])
+async def stream_resume(request):
+    """
+    Open SSE stream to receive events from a resumed workflow.
+
+    Use this after calling approve-plan or approve-player to receive
+    the execution events from the resumed workflow.
+
+    Query params:
+    - chat_session_id: int (required)
+
+    Returns:
+    SSE stream with workflow events (plan_step_progress, token, final, etc.)
+    """
+    user = await get_current_user_async(request)
+    if not user:
+        logger.warning("Unauthenticated request to stream_resume endpoint")
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    chat_session_id = request.GET.get("chat_session_id")
+    if not chat_session_id:
+        return JsonResponse({"error": "chat_session_id is required"}, status=400)
+
+    try:
+        chat_session_id = int(chat_session_id)
+    except ValueError:
+        return JsonResponse({"error": "chat_session_id must be an integer"}, status=400)
+
+    # Validate session ownership
+    from app.services.chat_service import get_session
+    from asgiref.sync import sync_to_async
+
+    session = await sync_to_async(get_session)(user.id, chat_session_id)
+    if not session:
+        logger.warning(
+            f"[STREAM_RESUME] Session ownership validation failed: user={user.id} session={chat_session_id}"
+        )
+        return JsonResponse(
+            {"error": "Chat session not found or access denied"}, status=404
+        )
+
+    logger.info(
+        f"[STREAM_RESUME] Opening resume stream for session={chat_session_id} user={user.id}"
+    )
+
+    async def resume_event_stream():
+        """SSE stream that listens for events from a resumed workflow."""
+        pubsub = None
+        try:
+            redis_client = await get_redis_client()
+            tenant_id = str(user.id)
+            channel = f"chat:{tenant_id}:{chat_session_id}"
+
+            pubsub = redis_client.pubsub()
+            await pubsub.subscribe(channel)
+
+            # Wait for subscription confirmation
+            confirm_msg = await pubsub.get_message(timeout=5.0)
+            if confirm_msg and confirm_msg["type"] == "subscribe":
+                logger.info(f"[STREAM_RESUME] Subscribed to Redis channel: {channel}")
+
+            # Listen with timeout
+            loop = asyncio.get_running_loop()
+            start_time = loop.time()
+            timeout_seconds = STREAM_TIMEOUT_SECONDS
+            last_heartbeat = start_time
+            heartbeat_interval = SSE_HEARTBEAT_SECONDS
+
+            async for msg in pubsub.listen():
+                current_time = loop.time()
+                elapsed = current_time - start_time
+
+                # Timeout check
+                if elapsed > timeout_seconds:
+                    logger.warning(
+                        f"[STREAM_RESUME] Timeout after {timeout_seconds}s for channel {channel}"
+                    )
+                    yield _format_sse_event(
+                        {
+                            "type": "error",
+                            "data": {"error": f"Timeout after {timeout_seconds}s"},
+                        }
+                    )
+                    break
+
+                # Heartbeat
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    yield _format_sse_event(
+                        {"type": "heartbeat", "data": {"timestamp": current_time}}
+                    )
+                    last_heartbeat = current_time
+
+                # Skip subscription confirmation
+                if msg["type"] in ["subscribe", "psubscribe"]:
+                    continue
+
+                # Process messages
+                if msg["type"] == "message":
+                    try:
+                        event_data = json.loads(msg["data"].decode("utf-8"))
+                        yield _format_sse_event(event_data)
+                        event_type = event_data.get("type")
+
+                        # Close on interrupt (another HITL gate), final, error, or done
+                        if event_type in ["interrupt", "final", "error", "done"]:
+                            logger.info(
+                                f"[STREAM_RESUME] Closing stream on {event_type} event for session={chat_session_id}"
+                            )
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        logger.error(f"[STREAM_RESUME] Error processing message: {e}")
+                        continue
+                elif msg["type"] in ["unsubscribe", "punsubscribe"]:
+                    break
+
+        except asyncio.CancelledError:
+            logger.info(
+                f"[STREAM_RESUME] Stream cancelled for session={chat_session_id}"
+            )
+        except Exception as e:
+            logger.error(f"[STREAM_RESUME] Error in stream: {e}", exc_info=True)
+            yield _format_sse_event({"type": "error", "data": {"error": str(e)}})
+        finally:
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe()
+                    await pubsub.close()
+                except Exception:
+                    pass
+
+    response = StreamingHttpResponse(
+        resume_event_stream(), content_type="text/event-stream"
+    )
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
 async def list_scout_reports(request):
     """
     List all scouting reports for the authenticated user.
@@ -1207,6 +1341,123 @@ async def list_scout_reports(request):
         logger.error(
             f"Unexpected error in list_scout_reports endpoint: {e}", exc_info=True
         )
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+async def delete_scout_report(request, report_id):
+    """
+    Delete a specific scouting report.
+
+    URL: DELETE /api/scout-reports/<report_id>/
+    """
+    user = await get_current_user_async(request)
+    if not user:
+        logger.warning("Unauthenticated request to delete_scout_report endpoint")
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        from app.db.models.scouting_report import ScoutingReport
+        from app.db.models.player import Player
+        from asgiref.sync import sync_to_async
+        from uuid import UUID
+
+        try:
+            report_uuid = UUID(report_id)
+        except ValueError:
+            return JsonResponse({"error": "Invalid report ID format"}, status=400)
+
+        # Get the report and verify ownership
+        @sync_to_async
+        def get_and_delete_report():
+            try:
+                report = ScoutingReport.objects.select_related("player").get(
+                    id=report_uuid
+                )
+                if report.player.owner_id != user.id:
+                    return None, "Report not found or access denied"
+
+                player_name = report.player.display_name
+                player = report.player
+
+                # Delete the report
+                report.delete()
+
+                # Also delete the player if they have no other reports
+                remaining_reports = ScoutingReport.objects.filter(player=player).count()
+                if remaining_reports == 0:
+                    player.delete()
+                    logger.info(f"Deleted orphaned player {player.id} ({player_name})")
+
+                return player_name, None
+            except ScoutingReport.DoesNotExist:
+                return None, "Report not found"
+
+        player_name, error = await get_and_delete_report()
+
+        if error:
+            return JsonResponse({"error": error}, status=404)
+
+        logger.info(
+            f"Deleted scout report {report_id} for player {player_name}, user {user.id}"
+        )
+        return JsonResponse(
+            {"success": True, "message": f"Report for {player_name} deleted"}
+        )
+
+    except Exception as e:
+        logger.error(f"Error deleting scout report: {e}", exc_info=True)
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+async def delete_all_scout_reports(request):
+    """
+    Delete all scouting reports for the authenticated user.
+
+    URL: DELETE /api/scout-reports/delete-all/
+    """
+    user = await get_current_user_async(request)
+    if not user:
+        logger.warning("Unauthenticated request to delete_all_scout_reports endpoint")
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    try:
+        from app.db.models.scouting_report import ScoutingReport
+        from app.db.models.player import Player
+        from asgiref.sync import sync_to_async
+
+        @sync_to_async
+        def delete_all_reports():
+            # Get all reports for the user
+            reports = ScoutingReport.objects.filter(player__owner=user)
+            count = reports.count()
+
+            # Get associated player IDs before deleting reports
+            player_ids = list(reports.values_list("player_id", flat=True).distinct())
+
+            # Delete all reports
+            reports.delete()
+
+            # Delete orphaned players (players with no reports)
+            for player_id in player_ids:
+                remaining = ScoutingReport.objects.filter(player_id=player_id).count()
+                if remaining == 0:
+                    Player.objects.filter(id=player_id).delete()
+
+            return count
+
+        count = await delete_all_reports()
+
+        logger.info(f"Deleted all {count} scout reports for user {user.id}")
+        return JsonResponse(
+            {"success": True, "message": f"Deleted {count} reports", "count": count}
+        )
+
+    except Exception as e:
+        logger.error(f"Error deleting all scout reports: {e}", exc_info=True)
         return JsonResponse({"error": str(e)}, status=500)
 
 

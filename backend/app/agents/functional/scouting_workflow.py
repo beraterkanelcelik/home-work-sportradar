@@ -354,16 +354,15 @@ def scouting_workflow(
     # =========================================================================
     # Node 1: Intake and Route (Step 1)
     # =========================================================================
-    # Note: We don't know total steps yet, so we emit with total_steps=0
-    # The frontend should handle this gracefully
+    # Note: These are pre-plan workflow steps, not actual plan steps
+    # Use 'workflow_status' event type so frontend doesn't show them as plan progress
     emit_scouting_event(
         config,
-        "plan_step_progress",
+        "workflow_status",
         {
-            "step_index": 0,
-            "total_steps": 0,  # Unknown yet
+            "phase": "intake",
             "status": "in_progress",
-            "step_name": "Analyzing request and identifying player",
+            "message": "Analyzing request and identifying player",
         },
     )
 
@@ -378,12 +377,11 @@ def scouting_workflow(
 
         emit_scouting_event(
             config,
-            "plan_step_progress",
+            "workflow_status",
             {
-                "step_index": 0,
-                "total_steps": 0,
+                "phase": "intake",
                 "status": "completed",
-                "step_name": "Analyzing request and identifying player",
+                "message": "Analyzing request and identifying player",
                 "result": f"Identified: {state.player_name} ({state.sport_guess})",
             },
         )
@@ -406,12 +404,11 @@ def scouting_workflow(
     # =========================================================================
     emit_scouting_event(
         config,
-        "plan_step_progress",
+        "workflow_status",
         {
-            "step_index": 1,
-            "total_steps": 0,  # Unknown yet
+            "phase": "planning",
             "status": "in_progress",
-            "step_name": "Drafting scouting plan",
+            "message": "Drafting scouting plan",
         },
     )
 
@@ -426,12 +423,11 @@ def scouting_workflow(
 
     emit_scouting_event(
         config,
-        "plan_step_progress",
+        "workflow_status",
         {
-            "step_index": 1,
-            "total_steps": len(state.plan_steps),
+            "phase": "planning",
             "status": "completed",
-            "step_name": "Drafting scouting plan",
+            "message": "Drafting scouting plan",
             "result": f"Generated {len(state.plan_steps)} steps",
         },
     )

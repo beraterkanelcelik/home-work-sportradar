@@ -30,13 +30,13 @@
  * 
  * Location: frontend/src/app/chat/ChatPage.tsx
  */
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useChatStore, type Message } from '@/state/useChatStore'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
-import { createAgentStream, StreamEvent } from '@/lib/streaming'
+import { createAgentStream, createResumeStream, StreamEvent, SSEResumeStream } from '@/lib/streaming'
 import { chatAPI, agentAPI, documentAPI, modelsAPI } from '@/lib/api'
 import { getErrorMessage } from '@/lib/utils'
 import { generateTempMessageId, generateTempStatusMessageId } from '@/constants/messages'
@@ -48,9 +48,11 @@ import MessageList from '@/components/chat/MessageList'
 import ChatInput from '@/components/chat/ChatInput'
 import StatsDialog from '@/components/chat/StatsDialog'
 import DeleteDialogs from '@/components/chat/DeleteDialogs'
+import PlanPanel from '@/components/chat/PlanPanel'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { usePlanApproval } from '@/hooks/usePlanApproval'
 import { usePlayerApproval } from '@/hooks/usePlayerApproval'
+import { useUiMessagePersistence } from '@/hooks/useUiMessagePersistence'
 
 
 export default function ChatPage() {
@@ -98,6 +100,14 @@ export default function ChatPage() {
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
   const [executingPlanMessageId, setExecutingPlanMessageId] = useState<number | null>(null)
   
+  // Plan panel state
+  const [planPanelCollapsed, setPlanPanelCollapsed] = useState(false)
+  const [showPlanPanel, setShowPlanPanel] = useState(true)
+  // Track which plans have been approved (prevents buttons from reappearing after loadMessages)
+  const [approvedPlanMessageIds, setApprovedPlanMessageIds] = useState<Set<number>>(new Set())
+  // Track which plans have completed execution
+  const [completedPlanMessageIds, setCompletedPlanMessageIds] = useState<Set<number>>(new Set())
+  
   // Stats dialog state
   const [expandedActivities, setExpandedActivities] = useState<string[]>([])
   const [expandedChains, setExpandedChains] = useState<string[]>([])
@@ -109,6 +119,7 @@ export default function ChatPage() {
   // Refs for streaming
   const processedInterruptsRef = useRef<Set<string>>(new Set())
   const streamRef = useRef<ReturnType<typeof createAgentStream> | null>(null)
+  const resumeStreamRef = useRef<SSEResumeStream | null>(null)
   const initialMessageSentRef = useRef(false)
   const initialMessageRef = useRef<string | null>(null)
 
@@ -607,23 +618,29 @@ export default function ChatPage() {
                 }
 
                 // Handle plan step progress updates (for scouting workflow real-time progress)
+                // NOTE: Only store progress when total_steps > 0 (after plan is generated)
+                // Pre-plan steps (analyzing, identifying, drafting) have total_steps=0 and should NOT be stored
+                // because they would cause isApproved to be incorrectly true
                 if (updateData.type === 'plan_step_progress') {
                   console.log(`[FRONTEND] [PLAN_PROGRESS] Step ${updateData.step_index + 1}/${updateData.total_steps}: ${updateData.status} - ${updateData.step_name}`)
                   
-                  // Update the plan with step progress
-                  if (!updates.plan_progress) {
-                    updates.plan_progress = {}
-                  }
-                  updates.plan_progress = {
-                    ...updates.plan_progress,
-                    current_step_index: updateData.step_index,
-                    total_steps: updateData.total_steps,
-                    steps_status: {
-                      ...(updates.plan_progress?.steps_status || {}),
-                      [updateData.step_index]: {
-                        status: updateData.status,
-                        step_name: updateData.step_name,
-                        result: updateData.result,
+                  // Skip pre-plan progress (total_steps=0 means plan hasn't been generated yet)
+                  if (updateData.total_steps > 0) {
+                    // Update the plan with step progress
+                    if (!updates.plan_progress) {
+                      updates.plan_progress = {}
+                    }
+                    updates.plan_progress = {
+                      ...updates.plan_progress,
+                      current_step_index: updateData.step_index,
+                      total_steps: updateData.total_steps,
+                      steps_status: {
+                        ...(updates.plan_progress?.steps_status || {}),
+                        [updateData.step_index]: {
+                          status: updateData.status,
+                          step_name: updateData.step_name,
+                          result: updateData.result,
+                        }
                       }
                     }
                   }
@@ -717,27 +734,58 @@ export default function ChatPage() {
               })
             } else if (eventType === 'plan_step_progress') {
               // Handle plan step progress events from scouting workflow
+              // NOTE: Only store progress when total_steps > 0 (after plan is generated)
+              // Pre-plan steps (analyzing, identifying, drafting) have total_steps=0 and should NOT be stored
               const progressData = event.data || {}
               console.log(`[FRONTEND] [PLAN_PROGRESS] Step ${progressData.step_index + 1}/${progressData.total_steps}: ${progressData.status} - ${progressData.step_name}`)
               
-              set((state: { messages: Message[] }) => {
-                const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
-                if (!currentMessage) {
-                  return state
+              // Skip pre-plan progress (total_steps=0 means plan hasn't been generated yet)
+              if (progressData.total_steps > 0) {
+                set((state: { messages: Message[] }) => {
+                  const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+                  if (!currentMessage) {
+                    return state
+                  }
+                  
+                  const currentProgress = currentMessage.plan_progress || {
+                    current_step_index: -1,
+                    total_steps: progressData.total_steps || 0,
+                    steps_status: {}
+                  }
+                  
+                  const updatedProgress = {
+                    ...currentProgress,
+                    current_step_index: progressData.status === 'in_progress' ? progressData.step_index : currentProgress.current_step_index,
+                    total_steps: progressData.total_steps || currentProgress.total_steps,
+                    steps_status: {
+                      ...currentProgress.steps_status,
+                      [progressData.step_index]: {
+                        status: progressData.status,
+                        step_name: progressData.step_name,
+                        result: progressData.result,
+                      }
+                    }
+                  }
+                  
+                  return {
+                    messages: state.messages.map((msg: Message) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            plan_progress: updatedProgress
+                          }
+                        : msg
+                    ),
                 }
-                
-                const currentProgress = currentMessage.plan_progress || {
-                  current_step_index: -1,
-                  total_steps: progressData.total_steps || 0,
-                  steps_status: {}
-                }
-                
+              })
+              
+              // Persist plan progress to backend (debounced - only update on step completion)
+              if (progressData.status === 'completed' || progressData.status === 'error') {
+                // Build progress object from current state
                 const updatedProgress = {
-                  ...currentProgress,
-                  current_step_index: progressData.status === 'in_progress' ? progressData.step_index : currentProgress.current_step_index,
-                  total_steps: progressData.total_steps || currentProgress.total_steps,
+                  current_step_index: progressData.step_index,
+                  total_steps: progressData.total_steps,
                   steps_status: {
-                    ...currentProgress.steps_status,
                     [progressData.step_index]: {
                       status: progressData.status,
                       step_name: progressData.step_name,
@@ -745,18 +793,11 @@ export default function ChatPage() {
                     }
                   }
                 }
-                
-                return {
-                  messages: state.messages.map((msg: Message) =>
-                    msg.id === assistantMessageId
-                      ? {
-                          ...msg,
-                          plan_progress: updatedProgress
-                        }
-                      : msg
-                  ),
-                }
-              })
+                updatePlanProgress(assistantMessageId, updatedProgress).catch(err => {
+                  console.error('[UI_PERSIST] Failed to update plan progress:', err)
+                })
+              }
+              } // End of if (progressData.total_steps > 0)
             } else if (eventType === 'error') {
               const errorData = event.data || {}
               const duration = Date.now() - streamStartTime
@@ -811,33 +852,57 @@ export default function ChatPage() {
               console.log(`[HITL] [DEBUG] Final interruptValue:`, interruptValue)
               
               if (interruptValue && interruptValue.type === 'plan_approval') {
-                // Plan approval interrupt - handle both general planner and scouting formats:
+                // Plan approval interrupt - handle formats:
                 // 1. General planner: { type: "plan_approval", plan: { type: "plan_proposal", plan: [...], plan_index: 0, plan_total: X } }
-                // 2. Scouting: { type: "plan_approval", player_name: "...", sport_guess: "...", plan_steps: [...], query_hints: [...] }
+                // 2. Dynamic scouting: { type: "plan_approval", plan: { intent, steps: [...] } } - ExecutionPlan object
+                // 3. Dynamic scouting (root): { type: "plan_approval", intent: "...", steps: [{ action, description }] }
                 let planData = interruptValue.plan
 
-                // Handle scouting workflow format - convert to common format
-                if (!planData && interruptValue.plan_steps) {
+                // Handle case where plan is an ExecutionPlan object (has steps, not plan array)
+                // This happens when backend sends: { plan: { intent, steps: [...] } }
+                if (planData && planData.steps && Array.isArray(planData.steps) && !planData.plan) {
+                  console.log(`[HITL] [PLAN_APPROVAL] Detected ExecutionPlan format, converting...`)
                   planData = {
                     type: 'plan_proposal',
-                    plan: interruptValue.plan_steps.map((step: string, index: number) => ({
-                      // Match PlanStep interface expected by PlanProposal.tsx
-                      action: 'tool',  // Mark as tool action so it shows the description
-                      tool: `Step ${index + 1}`,  // Tool name displayed as step number
+                    plan: planData.steps.map((step: { action: string; description: string; params?: Record<string, any> }, index: number) => ({
+                      action: step.action,
+                      tool: step.description,
                       agent: 'scouting',
-                      query: step,  // The step description goes in query field
+                      query: step.description,
+                      params: step.params || {},
                     })),
                     plan_index: 0,
-                    plan_total: interruptValue.plan_steps.length,
-                    // Include scouting-specific metadata
-                    player_name: interruptValue.player_name,
-                    sport_guess: interruptValue.sport_guess,
-                    query_hints: interruptValue.query_hints,
+                    plan_total: planData.steps.length,
+                    intent: planData.intent,
+                    player_name: planData.player_name,
+                    sport_guess: planData.sport_guess,
+                    reasoning: planData.reasoning,
                     session_id: interruptValue.session_id
                   }
-                  console.log(`[HITL] [PLAN_APPROVAL] Converted scouting plan format:`, planData)
+                  console.log(`[HITL] [PLAN_APPROVAL] Converted ExecutionPlan format:`, planData)
                 }
-
+                // Handle NEW dynamic plan format at root level - convert to common format
+                else if (!planData && interruptValue.steps && Array.isArray(interruptValue.steps)) {
+                  planData = {
+                    type: 'plan_proposal',
+                    plan: interruptValue.steps.map((step: { action: string; description: string; params?: Record<string, any> }, index: number) => ({
+                      action: step.action,
+                      tool: step.description,  // Use description as the display text
+                      agent: 'scouting',
+                      query: step.description,
+                      params: step.params || {},
+                    })),
+                    plan_index: 0,
+                    plan_total: interruptValue.steps.length,
+                    // Include metadata
+                    intent: interruptValue.intent,
+                    player_name: interruptValue.player_name,
+                    sport_guess: interruptValue.sport_guess,
+                    reasoning: interruptValue.reasoning,
+                    session_id: interruptValue.session_id
+                  }
+                  console.log(`[HITL] [PLAN_APPROVAL] Converted NEW dynamic plan format:`, planData)
+                }
                 console.log(`[HITL] [PLAN_APPROVAL] Received plan approval interrupt:`, planData)
 
                 // Validate plan data structure
@@ -891,6 +956,12 @@ export default function ChatPage() {
                         : msg
                     ),
                   }
+                })
+                
+                // Persist plan proposal to backend (UI-only message)
+                // This ensures the plan survives page refresh
+                savePlanProposal(assistantMessageId, planData).catch(err => {
+                  console.error('[UI_PERSIST] Failed to save plan proposal:', err)
                 })
 
               } else if (interruptValue && interruptValue.type === 'tool_approval') {
@@ -1030,6 +1101,12 @@ export default function ChatPage() {
                     )
                   }
                 })
+                
+                // Persist player preview to backend (UI-only message)
+                // This ensures the player preview survives page refresh
+                savePlayerPreview(assistantMessageId, playerPreview).catch(err => {
+                  console.error('[UI_PERSIST] Failed to save player preview:', err)
+                })
 
               // Don't set sending=false here - we're waiting for resume
               // Connection stays open to receive final response after resume
@@ -1165,6 +1242,9 @@ export default function ChatPage() {
     return () => {
       if (streamRef.current) {
         streamRef.current.close()
+      }
+      if (resumeStreamRef.current) {
+        resumeStreamRef.current.close()
       }
     }
   }, [])
@@ -1331,6 +1411,274 @@ export default function ChatPage() {
   // ============================================================================
   // CUSTOM HOOKS
   // ============================================================================
+  
+  // UI Message Persistence Hook - MUST be defined before handleResumeStream
+  // Location: frontend/src/hooks/useUiMessagePersistence.ts
+  // Persists plan proposals and player previews to the database (UI-only messages)
+  const {
+    savePlanProposal,
+    updatePlanProgress,
+    savePlayerPreview,
+    clearSavedMessages,
+  } = useUiMessagePersistence({
+    sessionId: currentSession?.id ?? null,
+  })
+  
+  // Clear saved messages when session changes
+  useEffect(() => {
+    clearSavedMessages()
+  }, [currentSession?.id, clearSavedMessages])
+
+  /**
+   * Handle resume stream after HITL approval (plan or player).
+   * 
+   * This function opens a new SSE connection to receive events from the resumed workflow.
+   * The original stream closes on interrupt, so we need a new stream for execution events.
+   * 
+   * @param planMessageId - Optional message ID to use for plan progress updates.
+   *                        Pass this directly to avoid race conditions with state updates.
+   */
+  const handleResumeStream = useCallback((planMessageId?: number) => {
+    if (!currentSession) {
+      console.error('[RESUME_STREAM] No current session')
+      return
+    }
+
+    // Close any existing resume stream
+    if (resumeStreamRef.current) {
+      resumeStreamRef.current.close()
+    }
+
+    // Use passed planMessageId first (avoids race condition), then fall back to state, then generate temp ID
+    const assistantMessageId = planMessageId || executingPlanMessageId || generateTempMessageId()
+    
+    console.log(`[RESUME_STREAM] Opening resume stream for session=${currentSession.id}, planMessageId=${planMessageId}, executingPlanMessageId=${executingPlanMessageId}, using assistantMessageId=${assistantMessageId}`)
+    
+    // Track if we received a player_approval interrupt - if so, don't reload messages on complete
+    // This prevents loadMessages() from clearing the player preview we just set
+    let receivedPlayerApproval = false
+
+    const resumeStream = createResumeStream(
+      currentSession.id,
+      (event: StreamEvent) => {
+        const eventType = event.type
+        console.log(`[RESUME_STREAM] Received event: ${eventType}`)
+
+        if (eventType === 'plan_step_progress') {
+          // Handle plan step progress events
+          const progressData = event.data || {}
+          console.log(`[RESUME_STREAM] [PLAN_PROGRESS] Step ${progressData.step_index + 1}/${progressData.total_steps}: ${progressData.status} - ${progressData.step_name}`)
+          
+          set((state: { messages: Message[] }) => {
+            const currentMessage = state.messages.find((msg: Message) => msg.id === assistantMessageId)
+            if (!currentMessage) {
+              console.warn(`[RESUME_STREAM] [PLAN_PROGRESS] Message not found! assistantMessageId=${assistantMessageId}, available message IDs:`, state.messages.map(m => m.id))
+              return state
+            }
+            
+            console.log(`[RESUME_STREAM] [PLAN_PROGRESS] Updating message ${currentMessage.id} with step progress`)
+            
+            const currentProgress = currentMessage.plan_progress || {
+              current_step_index: -1,
+              total_steps: progressData.total_steps || 0,
+              steps_status: {}
+            }
+            
+            const updatedProgress = {
+              ...currentProgress,
+              current_step_index: progressData.status === 'in_progress' ? progressData.step_index : currentProgress.current_step_index,
+              total_steps: progressData.total_steps || currentProgress.total_steps,
+              steps_status: {
+                ...currentProgress.steps_status,
+                [progressData.step_index]: {
+                  status: progressData.status,
+                  step_name: progressData.step_name,
+                  result: progressData.result,
+                }
+              }
+            }
+            
+            return {
+              messages: state.messages.map((msg: Message) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, plan_progress: updatedProgress }
+                  : msg
+              ),
+            }
+          })
+
+          // Persist plan progress to backend
+          if (progressData.status === 'completed' || progressData.status === 'error') {
+            const updatedProgress = {
+              current_step_index: progressData.step_index,
+              total_steps: progressData.total_steps,
+              steps_status: {
+                [progressData.step_index]: {
+                  status: progressData.status,
+                  step_name: progressData.step_name,
+                  result: progressData.result,
+                }
+              }
+            }
+            updatePlanProgress(assistantMessageId, updatedProgress).catch(err => {
+              console.error('[RESUME_STREAM] Failed to update plan progress:', err)
+            })
+          }
+        } else if (eventType === 'token') {
+          // Handle streaming tokens (for final answer)
+          const token = event.data?.token || event.data?.content || ''
+          if (token) {
+            set((state: { messages: Message[] }) => ({
+              messages: state.messages.map((msg: Message) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, content: (msg.content || '') + token }
+                  : msg
+              ),
+            }))
+          }
+        } else if (eventType === 'message_saved') {
+          // Update message with real DB id
+          const savedData = event.data || {}
+          if (savedData.db_id && savedData.role === 'assistant') {
+            console.log(`[RESUME_STREAM] Message saved with db_id=${savedData.db_id}`)
+            set((state: { messages: Message[] }) => ({
+              messages: state.messages.map((msg: Message) =>
+                msg.id === assistantMessageId
+                  ? { ...msg, id: savedData.db_id }
+                  : msg
+              ),
+            }))
+          }
+        } else if (eventType === 'interrupt') {
+          // Another HITL gate (e.g., player approval after plan execution)
+          const interruptData = event.data || {}
+          const interruptValue = interruptData.value || interruptData
+          console.log(`[RESUME_STREAM] [INTERRUPT] Another interrupt received: type=${interruptValue?.type}`, interruptValue)
+          
+          if (interruptValue && interruptValue.type === 'player_approval') {
+            // Player approval interrupt - HITL Gate B for scouting workflow
+            // Backend sends: { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
+            
+            // Mark that we received player approval - this prevents loadMessages() from clearing the preview
+            receivedPlayerApproval = true
+            
+            // Convert backend format to frontend expected format
+            const playerPreview = {
+              player: interruptValue.player_fields,
+              report_summary: interruptValue.report_summary,
+              report_text: interruptValue.report_text,
+              session_id: interruptValue.session_id
+            }
+
+            console.log(`[RESUME_STREAM] [PLAYER_HITL] Received player approval interrupt: session=${currentSession?.id} player=${playerPreview?.player?.display_name}`, playerPreview)
+
+            // Update the SAME message that has the plan (identified by executingPlanMessageId)
+            // Don't create a new message - update the existing plan message with player preview
+            set((state: { messages: Message[] }) => {
+              // Try to find message by executingPlanMessageId first, then by assistantMessageId
+              const messageIdToUpdate = executingPlanMessageId || assistantMessageId
+              let currentMessage = state.messages.find((msg: Message) => msg.id === messageIdToUpdate)
+
+              // If not found by temp ID, try to find by checking if it's a plan proposal message
+              if (!currentMessage) {
+                currentMessage = state.messages.find((msg: Message) => 
+                  msg.response_type === 'plan_proposal' && msg.role === 'assistant'
+                )
+              }
+
+              // If still not found, create new message
+              if (!currentMessage) {
+                console.log(`[RESUME_STREAM] [PLAYER_HITL] Creating assistant message for player preview: session=${currentSession?.id}`)
+                const newMessage: Message = {
+                  id: assistantMessageId,
+                  role: 'assistant',
+                  content: '',
+                  tokens_used: 0,
+                  created_at: new Date().toISOString(),
+                  metadata: {
+                    agent_name: 'scouting'
+                  },
+                  response_type: 'player_preview',
+                  player_preview: playerPreview
+                }
+                return {
+                  messages: [...state.messages, newMessage]
+                }
+              }
+
+              console.log(`[RESUME_STREAM] [PLAYER_HITL] Updating existing message ${currentMessage.id} with player preview`)
+              // Update existing message with player preview data
+              return {
+                messages: state.messages.map((msg: Message) =>
+                  msg.id === currentMessage!.id
+                    ? {
+                        ...msg,
+                        response_type: 'player_preview',
+                        player_preview: playerPreview
+                      }
+                    : msg
+                )
+              }
+            })
+            
+            // Persist player preview to backend (UI-only message)
+            // This ensures the player preview survives page refresh
+            // Use a new temp ID for the player preview since it's a separate UI message
+            const playerPreviewMessageId = Date.now()
+            savePlayerPreview(playerPreviewMessageId, playerPreview).catch(err => {
+              console.error('[RESUME_STREAM] Failed to save player preview:', err)
+            })
+            
+            // DON'T clear executingPlanMessageId yet - we're in player approval stage
+            // The user needs to approve/reject the player before we're done
+            // setExecutingPlanMessageId(null) -- REMOVED to prevent loadMessages from clearing data
+            
+            // Mark the plan as completed (all steps finished, now waiting for player approval)
+            // This ensures buttons don't reappear after loadMessages
+            setCompletedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
+            setApprovedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
+            // Auto-collapse plan panel when execution reaches player approval
+            setPlanPanelCollapsed(true)
+          }
+          // Stream will close on interrupt, which is expected behavior
+          // DON'T reload messages here - we have the data we need and loadMessages would clear temp messages
+        } else if (eventType === 'final' || eventType === 'done') {
+          console.log(`[RESUME_STREAM] Stream finished with ${eventType}`)
+          // Mark plan as completed
+          setCompletedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
+          setApprovedPlanMessageIds(prev => new Set(prev).add(assistantMessageId))
+          setPlanPanelCollapsed(true)
+          setExecutingPlanMessageId(null)
+          // Reload messages to get final state from DB
+          loadMessages(currentSession.id)
+        } else if (eventType === 'error') {
+          console.error(`[RESUME_STREAM] Error event:`, event.data)
+          toast.error(event.data?.error || 'Error during plan execution')
+          setExecutingPlanMessageId(null)
+        }
+      },
+      (error: Error) => {
+        console.error(`[RESUME_STREAM] Stream error:`, error)
+        toast.error('Lost connection to server')
+        setExecutingPlanMessageId(null)
+      },
+      () => {
+        console.log(`[RESUME_STREAM] Stream complete, receivedPlayerApproval=${receivedPlayerApproval}`)
+        // Only reload messages if we didn't receive a player approval interrupt
+        // If we received player approval, loading messages would clear the temp player preview message
+        // The player preview is already saved to the backend via savePlayerPreview()
+        if (currentSession && !receivedPlayerApproval) {
+          loadMessages(currentSession.id)
+          setExecutingPlanMessageId(null)
+        }
+        // If we received player approval, DON'T clear executingPlanMessageId
+        // The player card needs this to show in the UI, and we're waiting for user approval/rejection
+      }
+    )
+
+    resumeStreamRef.current = resumeStream
+  }, [currentSession, executingPlanMessageId, set, loadMessages, updatePlanProgress, savePlayerPreview, setCompletedPlanMessageIds, setApprovedPlanMessageIds])
+
   // Tool Approval Hook
   // Location: frontend/src/hooks/useToolApproval.ts
   // Handles tool approval logic for human-in-the-loop workflows
@@ -1342,12 +1690,26 @@ export default function ChatPage() {
     loadMessages,
   })
   
+  // Callback to mark a plan as approved (persists across loadMessages)
+  const markPlanApproved = useCallback((messageId: number) => {
+    setApprovedPlanMessageIds(prev => new Set(prev).add(messageId))
+  }, [])
+  
+  // Callback to mark a plan as completed
+  const markPlanCompleted = useCallback((messageId: number) => {
+    setCompletedPlanMessageIds(prev => new Set(prev).add(messageId))
+    // Auto-collapse the plan panel when completed
+    setPlanPanelCollapsed(true)
+  }, [])
+  
   const { handleApprovePlan, handleRejectPlan, approvingPlans } = usePlanApproval({
     currentSession,
     updateMessages: (updater) => {
       set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
     },
     setExecutingPlanMessageId,
+    markPlanApproved,
+    onResumeStream: handleResumeStream,
   })
   
   const {
@@ -1362,7 +1724,55 @@ export default function ChatPage() {
       set((state: { messages: Message[] }) => ({ messages: updater(state.messages) }))
     },
     loadMessages,
+    onResumeStream: handleResumeStream,
   })
+  
+  // Compute the active plan for the plan panel
+  // Find the most recent message with a plan (either awaiting approval or executing)
+  const activePlanData = useMemo(() => {
+    // Find messages with plans, prioritizing the one being executed
+    let planMessage: Message | undefined
+    
+    if (executingPlanMessageId) {
+      // If we're executing a plan, show that one
+      planMessage = messages.find(m => m.id === executingPlanMessageId)
+    }
+    
+    if (!planMessage) {
+      // Find the most recent message with a plan proposal
+      const messagesWithPlans = messages.filter(m => 
+        m.response_type === 'plan_proposal' && m.plan
+      )
+      planMessage = messagesWithPlans[messagesWithPlans.length - 1]
+    }
+    
+    if (!planMessage?.plan) return null
+    
+    // Check if this plan has been approved or completed
+    const isApproved = approvedPlanMessageIds.has(planMessage.id)
+    const isCompleted = completedPlanMessageIds.has(planMessage.id)
+    const isExecuting = !!executingPlanMessageId && planMessage.id === executingPlanMessageId
+    
+    return {
+      plan: planMessage.plan,
+      progress: planMessage.plan_progress,
+      isExecuting,
+      isApproved: isApproved || isExecuting, // Show as approved if executing or explicitly approved
+      isCompleted,
+      messageId: planMessage.id,
+    }
+  }, [messages, executingPlanMessageId, approvedPlanMessageIds, completedPlanMessageIds])
+
+  // Auto-show plan panel when a new plan arrives (even if user previously closed it)
+  // Track the last seen plan message ID to detect new plans
+  const lastSeenPlanIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (activePlanData && activePlanData.messageId !== lastSeenPlanIdRef.current) {
+      // New plan detected - show the panel
+      setShowPlanPanel(true)
+      lastSeenPlanIdRef.current = activePlanData.messageId
+    }
+  }, [activePlanData])
 
   // Handle plan rejection (legacy - kept for backward compatibility)
   const handlePlanRejection = useCallback((messageId: number) => {
@@ -1408,6 +1818,7 @@ export default function ChatPage() {
         onSelectSession={handleSelectSession}
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
+        onDeleteAllChats={handleDeleteAllSessions}
         renameSessionId={renameSessionId}
         renameSessionTitle={renameSessionTitle}
         setRenameSessionTitle={setRenameSessionTitle}
@@ -1527,6 +1938,29 @@ export default function ChatPage() {
           </>
         )}
       </div>
+      
+      {/* Plan Panel - Right Side */}
+      {/* Shows active plan with real-time progress during execution */}
+      {currentSession && activePlanData && showPlanPanel && (
+        <PlanPanel
+          plan={activePlanData.plan}
+          progress={activePlanData.progress}
+          isExecuting={activePlanData.isExecuting}
+          isCollapsed={planPanelCollapsed}
+          onToggleCollapse={() => setPlanPanelCollapsed(!planPanelCollapsed)}
+          onClose={() => setShowPlanPanel(false)}
+          onApprove={() => {
+            // handleApprovePlan expects (messageId, planData)
+            handleApprovePlan(activePlanData.messageId, activePlanData.plan)
+          }}
+          onReject={() => {
+            // handleRejectPlan expects (messageId)
+            handleRejectPlan(activePlanData.messageId)
+          }}
+          isApproved={activePlanData.isApproved}
+          isCompleted={activePlanData.isCompleted}
+        />
+      )}
     </div>
 
     {/* Delete Confirmation Dialogs */}

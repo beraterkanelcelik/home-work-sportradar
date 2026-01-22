@@ -2,22 +2,18 @@
 Unified Agent Workflow for LangGraph Functional API.
 
 This is the main entrypoint for all agent interactions. It handles:
-- Supervisor routing (greeter, search, scouting)
-- Scouting flow with 2 HITL gates (plan approval, player approval)
-- Simple greeting responses
-- RAG-based search with LLM synthesis
+- Dynamic plan generation based on user intent
+- Plan approval via HITL Gate A (Accept/Reject)
+- Sequential plan execution
+- Player approval via HITL Gate B (for save_player action)
 
 Architecture:
-    Node 0: Supervisor Routing
-        ├── greeter → LLM greeting → return AgentResponse
-        ├── search → RAG + LLM → return AgentResponse
-        └── scouting → continue to Node 1
-    Node 1: Intake (scouting)
-    Node 2: Draft Plan (scouting)
-    HITL Gate A: Plan Approval
-    Nodes 3-7: Build/Retrieve/Extract/Compose/Preview
-    HITL Gate B: Player Approval
-    Nodes 8-9: Write/Respond
+    1. Analyze user message
+    2. Generate dynamic ExecutionPlan
+    3. HITL Gate A: Plan Approval (Accept/Reject)
+    4. Execute plan steps sequentially
+    5. HITL Gate B: Player Approval (if save_player step)
+    6. Return final response
 """
 
 from typing import Optional, List, Dict, Any, Union
@@ -25,24 +21,24 @@ from dataclasses import dataclass, field
 from queue import Full as QueueFull
 from langgraph.func import entrypoint, task
 from langgraph.types import interrupt, Command
+from langgraph.errors import GraphInterrupt
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from app.agents.functional.models import AgentResponse, RoutingDecision, ToolResult
 from app.agents.functional.scouting.schemas import (
-    IntakeResult,
-    PlanProposal,
+    ExecutionPlan,
+    PlanStep,
     EvidencePack,
     PlayerFields,
     Coverage,
     ScoutingReportDraft,
     DbPayloadPreview,
     CreatePlayerWithReportResponse,
+    ChunkData,
 )
 from app.agents.functional.tasks.scouting import (
-    intake_and_route_scouting,
-    draft_plan,
-    build_queries,
+    generate_plan,
     retrieve_evidence,
     extract_fields,
     compose_report,
@@ -60,9 +56,6 @@ from app.agents.functional.workflow import (
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
-
-# Maximum edit iterations to prevent infinite loops
-MAX_EDIT_ITERATIONS = 5
 
 
 def emit_workflow_event(
@@ -99,54 +92,30 @@ class WorkflowState:
     api_key: str = ""
     run_id: Optional[str] = None
 
-    # Routing info
-    routed_agent: str = ""
-    routing_confidence: float = 0.0
+    # Plan info
+    plan: Optional[ExecutionPlan] = None
 
-    # Scouting-specific state (Node 1 output)
-    player_name: str = ""
-    sport_guess: str = "unknown"
-
-    # Node 2 output
-    plan_steps: List[str] = field(default_factory=list)
-    query_hints: List[str] = field(default_factory=list)
-
-    # Node 3 output
-    queries: List[str] = field(default_factory=list)
-
-    # Node 4 output
-    evidence_pack: Optional[EvidencePack] = None
-
-    # Node 5 output
+    # Execution context (accumulated during plan execution)
+    all_chunks: List[ChunkData] = field(default_factory=list)
+    all_queries: List[str] = field(default_factory=list)
     player_fields: Optional[PlayerFields] = None
     raw_facts: List[str] = field(default_factory=list)
     coverage: Optional[Coverage] = None
-
-    # Node 6 output
     report_draft: Optional[ScoutingReportDraft] = None
-
-    # Node 7 output
     preview: Optional[DbPayloadPreview] = None
 
-    # Node 8 output
+    # Results
     player_record_id: Optional[str] = None
     report_id: Optional[str] = None
     saved: bool = False
+    answer_context: str = ""
 
-    # Edit tracking
-    edit_iterations: int = 0
+    # Track completed step indices for resume (checkpoint doesn't restore step position)
+    completed_steps: List[int] = field(default_factory=list)
 
 
 def check_user_has_documents(user_id: int) -> bool:
-    """
-    Check if user has any indexed documents for RAG.
-
-    Args:
-        user_id: User ID
-
-    Returns:
-        True if user has at least one READY document
-    """
+    """Check if user has any indexed documents for RAG."""
     try:
         from app.db.models.document import Document
 
@@ -159,77 +128,62 @@ def check_user_has_documents(user_id: int) -> bool:
 
 
 def request_plan_approval(
-    player_name: str,
-    sport_guess: str,
-    plan_steps: List[str],
-    query_hints: List[str],
+    plan: ExecutionPlan,
     session_id: int,
 ) -> Dict[str, Any]:
     """
     Request plan approval via HITL Gate A.
 
-    Uses LangGraph's interrupt() to pause execution and wait for user decision.
-
-    Args:
-        player_name: Target player name
-        sport_guess: Guessed sport
-        plan_steps: Proposed plan steps
-        query_hints: Proposed query hints
-        session_id: Session ID for correlation
-
-    Returns:
-        Decision dict with approved/edited plan
+    User can Accept or Reject the plan.
     """
     logger.info(
-        f"[WORKFLOW] [HITL-A] Requesting plan approval for {player_name}, "
-        f"session={session_id}"
+        f"[WORKFLOW] [HITL-A] Requesting plan approval: {plan.intent}, "
+        f"{len(plan.steps)} steps, session={session_id}"
     )
+
+    # Convert plan to dict for interrupt payload
+    plan_dict = plan.model_dump()
 
     decision = interrupt(
         {
             "type": "plan_approval",
             "session_id": session_id,
-            "player_name": player_name,
-            "sport_guess": sport_guess,
-            "plan_steps": plan_steps,
-            "query_hints": query_hints,
+            "plan": plan_dict,
+            "player_name": plan.player_name,
+            "sport_guess": plan.sport_guess,
+            "intent": plan.intent,
+            "steps": [
+                {
+                    "action": step.action,
+                    "description": step.description,
+                    "params": step.params,
+                }
+                for step in plan.steps
+            ],
         }
     )
 
-    logger.info(
-        f"[WORKFLOW] [HITL-A] Plan approval decision received, "
-        f"edited={decision.get('edited', False)}"
-    )
+    approved = decision.get("approved", True) if decision else True
+    logger.info(f"[WORKFLOW] [HITL-A] Plan approval decision: approved={approved}")
 
     return decision or {"approved": True}
 
 
 def request_player_approval(
     preview: DbPayloadPreview,
-    report_summary: List[str],
-    report_text: str,
+    report_draft: ScoutingReportDraft,
     session_id: int,
 ) -> Dict[str, Any]:
     """
     Request player item approval via HITL Gate B.
 
-    Uses LangGraph's interrupt() to pause execution and wait for user decision.
-
-    Args:
-        preview: Database payload preview
-        report_summary: Report summary bullets
-        report_text: Full report text
-        session_id: Session ID for correlation
-
-    Returns:
-        Decision dict with action (approve/reject/edit_wording/edit_content)
+    User can Approve or Reject saving the player.
     """
     logger.info(
         f"[WORKFLOW] [HITL-B] Requesting player approval for "
         f"{preview.player.display_name}, session={session_id}"
     )
 
-    # Convert to dict for interrupt payload
     player_dict = preview.player.model_dump(exclude_none=True)
 
     decision = interrupt(
@@ -237,8 +191,8 @@ def request_player_approval(
             "type": "player_approval",
             "session_id": session_id,
             "player_fields": player_dict,
-            "report_summary": report_summary,
-            "report_text": report_text,
+            "report_summary": report_draft.report_summary,
+            "report_text": report_draft.report_text,
         }
     )
 
@@ -248,741 +202,437 @@ def request_player_approval(
     return decision or {"action": "approve"}
 
 
-def request_tool_approval(
-    tool_calls: List[Dict[str, Any]],
-    session_id: int,
+# ============================================================================
+# STEP EXECUTORS
+# ============================================================================
+
+
+def execute_rag_search_step(
+    step: PlanStep,
+    state: WorkflowState,
+    config: Optional[RunnableConfig],
 ) -> Dict[str, Any]:
-    """
-    Request tool approval via HITL interrupt.
+    """Execute a rag_search step."""
+    query = step.params.get("query", "")
+    if not query:
+        return {"success": False, "error": "No query provided"}
 
-    Args:
-        tool_calls: List of tool calls to approve
-        session_id: Session ID for correlation
+    logger.info(f"[WORKFLOW] Executing rag_search: {query[:50]}...")
 
-    Returns:
-        Decision dict with approvals per tool
-    """
-    logger.info(
-        f"[WORKFLOW] [HITL-TOOL] Requesting tool approval for "
-        f"{len(tool_calls)} tools, session={session_id}"
-    )
+    evidence = retrieve_evidence(
+        user_id=state.user_id,
+        queries=[query],
+        api_key=state.api_key,
+        max_chunks=15,
+    ).result()
 
-    decision = interrupt(
-        {
-            "type": "tool_approval",
-            "session_id": session_id,
-            "tool_calls": tool_calls,
-        }
-    )
+    # Accumulate chunks
+    state.all_chunks.extend(evidence.chunks)
+    state.all_queries.append(query)
 
-    logger.info(f"[WORKFLOW] [HITL-TOOL] Tool approval decision received")
+    # Build context for answer step
+    if evidence.chunks:
+        chunk_texts = [f"- {c.text[:300]}..." for c in evidence.chunks[:5]]
+        state.answer_context += f"\n\n**Search: {query}**\n" + "\n".join(chunk_texts)
 
-    return decision or {"approvals": {}}
-
-
-def tool_requires_approval(tool_name: str) -> bool:
-    """Check if a tool requires human approval before execution."""
-    # Tools that can run without approval
-    AUTO_APPROVE_TOOLS = {
-        "rag_retrieval_tool",  # RAG is safe - just reads user's own docs
+    return {
+        "success": True,
+        "chunks_found": len(evidence.chunks),
+        "confidence": evidence.confidence,
     }
-    return tool_name not in AUTO_APPROVE_TOOLS
 
 
-# ============================================================================
-# ROUTE HANDLERS
-# ============================================================================
-
-
-def handle_greeter_route(
+def execute_extract_player_step(
+    step: PlanStep,
     state: WorkflowState,
-    messages: List,
     config: Optional[RunnableConfig],
-) -> AgentResponse:
-    """
-    Handle greeter route - friendly LLM greeting response.
+) -> Dict[str, Any]:
+    """Execute an extract_player step."""
+    logger.info(f"[WORKFLOW] Executing extract_player for {state.plan.player_name}")
 
-    Args:
-        state: Workflow state
-        messages: Conversation history
-        config: Runtime config
+    if not state.all_chunks:
+        return {"success": False, "error": "No evidence available"}
 
-    Returns:
-        AgentResponse with greeting
-    """
-    logger.info(f"[WORKFLOW] Handling greeter route for user={state.user_id}")
+    # Dedupe and sort chunks
+    seen_ids = set()
+    unique_chunks = []
+    for chunk in state.all_chunks:
+        if chunk.chunk_id not in seen_ids:
+            seen_ids.add(chunk.chunk_id)
+            unique_chunks.append(chunk)
+    unique_chunks.sort(key=lambda c: c.score, reverse=True)
+    unique_chunks = unique_chunks[:40]
 
-    emit_workflow_event(
-        config,
-        "agent_start",
-        {"agent_name": "greeter"},
+    evidence_pack = EvidencePack(
+        queries=state.all_queries,
+        chunks=unique_chunks,
+        coverage=Coverage(found=[], missing=[]),
+        confidence="med" if len(unique_chunks) > 10 else "low",
     )
 
-    # Execute greeter agent
-    response = execute_agent(
-        agent_name="greeter",
-        messages=messages,
-        user_id=state.user_id,
-        config=config,
+    player_fields, raw_facts, coverage = extract_fields(
+        evidence_pack=evidence_pack,
+        player_name=state.plan.player_name or "Unknown Player",
+        sport_guess=state.plan.sport_guess or "unknown",
         api_key=state.api_key,
     ).result()
 
-    # Handle tool calls if greeter wants to use RAG
-    if response.tool_calls:
-        response = _handle_tool_execution(
-            response=response,
-            messages=messages,
-            state=state,
-            config=config,
-        )
+    state.player_fields = player_fields
+    state.raw_facts = raw_facts
+    state.coverage = coverage
 
-    logger.info(f"[WORKFLOW] Greeter response: {len(response.reply)} chars")
-    return response
+    return {
+        "success": True,
+        "facts_extracted": len(raw_facts),
+    }
 
 
-def handle_search_route(
+def execute_compose_report_step(
+    step: PlanStep,
     state: WorkflowState,
-    messages: List,
     config: Optional[RunnableConfig],
-) -> AgentResponse:
-    """
-    Handle search route - RAG retrieval + LLM synthesis.
+) -> Dict[str, Any]:
+    """Execute a compose_report step."""
+    logger.info(f"[WORKFLOW] Executing compose_report")
 
-    Args:
-        state: Workflow state
-        messages: Conversation history
-        config: Runtime config
+    if not state.player_fields:
+        return {"success": False, "error": "No player data available"}
 
-    Returns:
-        AgentResponse with search results
-    """
-    logger.info(f"[WORKFLOW] Handling search route for user={state.user_id}")
+    feedback = step.params.get("feedback")
 
-    emit_workflow_event(
-        config,
-        "agent_start",
-        {"agent_name": "search"},
-    )
-
-    # Check if user has documents
-    if not check_user_has_documents(state.user_id):
-        logger.warning(f"[WORKFLOW] User {state.user_id} has no documents for search")
-        return AgentResponse(
-            type="answer",
-            reply=(
-                "I don't have any documents to search through yet. "
-                "Please upload some documents first, then I can help you search and find information in them."
-            ),
-            agent_name="search",
-        )
-
-    # Execute search agent
-    response = execute_agent(
-        agent_name="search",
-        messages=messages,
-        user_id=state.user_id,
-        config=config,
+    report_draft = compose_report(
+        player_fields=state.player_fields,
+        raw_facts=state.raw_facts,
+        coverage=state.coverage or Coverage(found=[], missing=[]),
+        feedback=feedback,
         api_key=state.api_key,
     ).result()
 
-    # Handle tool calls (RAG retrieval)
-    if response.tool_calls:
-        response = _handle_tool_execution(
-            response=response,
-            messages=messages,
-            state=state,
-            config=config,
-        )
+    state.report_draft = report_draft
 
-    logger.info(f"[WORKFLOW] Search response: {len(response.reply)} chars")
-    return response
-
-
-def _handle_tool_execution(
-    response: AgentResponse,
-    messages: List,
-    state: WorkflowState,
-    config: Optional[RunnableConfig],
-) -> AgentResponse:
-    """
-    Handle tool execution with optional approval.
-
-    Args:
-        response: Agent response with tool_calls
-        messages: Conversation history
-        state: Workflow state
-        config: Runtime config
-
-    Returns:
-        AgentResponse after tool execution and refinement
-    """
-    tool_calls = response.tool_calls
-    if not tool_calls:
-        return response
-
-    logger.info(f"[WORKFLOW] Processing {len(tool_calls)} tool calls")
-
-    # Partition tools into auto-approve and needs-approval
-    auto_tools = []
-    approval_tools = []
-
-    for tc in tool_calls:
-        tool_name = tc.get("name") or tc.get("tool", "")
-        if tool_requires_approval(tool_name):
-            approval_tools.append(tc)
-        else:
-            auto_tools.append(tc)
-
-    # Request approval for tools that need it
-    approved_tools = auto_tools.copy()
-
-    if approval_tools:
-        emit_workflow_event(
-            config,
-            "tool_approval_required",
-            {"tool_calls": approval_tools},
-        )
-
-        decision = request_tool_approval(approval_tools, state.session_id)
-        approvals = decision.get("approvals", {})
-
-        for tc in approval_tools:
-            tool_id = tc.get("id", "")
-            if approvals.get(tool_id, {}).get("approved", False):
-                # Apply any edited args
-                if "args" in approvals.get(tool_id, {}):
-                    tc["args"] = approvals[tool_id]["args"]
-                approved_tools.append(tc)
-            else:
-                logger.info(f"[WORKFLOW] Tool {tc.get('name')} rejected by user")
-
-    if not approved_tools:
-        return AgentResponse(
-            type="answer",
-            reply="I was going to use some tools, but they were not approved. How else can I help you?",
-            agent_name=response.agent_name,
-        )
-
-    # Execute approved tools
-    tool_results = execute_tools(
-        tool_calls=approved_tools,
-        agent_name=response.agent_name,
-        user_id=state.user_id,
-        api_key=state.api_key,
-        config=config,
+    # Prepare preview
+    source_doc_ids = list(set(chunk.doc_id for chunk in state.all_chunks))
+    state.preview = prepare_preview(
+        report_draft=report_draft,
+        source_doc_ids=source_doc_ids,
     ).result()
 
-    # Build messages with tool results
-    from langchain_core.messages import AIMessage as AIM, ToolMessage as TM
-
-    updated_messages = list(messages)
-
-    # Add AI message with tool calls
-    updated_messages.append(
-        AIM(
-            content=response.reply or "",
-            tool_calls=approved_tools,
-        )
-    )
-
-    # Add tool result messages
-    for result in tool_results:
-        updated_messages.append(
-            TM(
-                content=result.output or result.error or "",
-                tool_call_id=result.tool_call_id,
-                name=result.tool,
-            )
-        )
-
-    # Refine with tool results
-    refined = refine_with_tool_results(
-        agent_name=response.agent_name,
-        messages=updated_messages,
-        tool_results=tool_results,
-        user_id=state.user_id,
-        config=config,
-        api_key=state.api_key,
-    ).result()
-
-    return refined
+    return {
+        "success": True,
+        "report_length": len(report_draft.report_text),
+    }
 
 
-# ============================================================================
-# SCOUTING FLOW
-# ============================================================================
-
-
-def run_scouting_flow(
+def execute_update_report_step(
+    step: PlanStep,
     state: WorkflowState,
     config: Optional[RunnableConfig],
-) -> AgentResponse:
-    """
-    Run the full scouting workflow (Nodes 1-9).
+) -> Dict[str, Any]:
+    """Execute an update_report step."""
+    logger.info("[WORKFLOW] Executing update_report")
 
-    Args:
-        state: Workflow state with user info
-        config: Runtime config
+    feedback = step.params.get("feedback", "")
+    # TODO: Load existing report and merge with new evidence
 
-    Returns:
-        AgentResponse with scouting report
-    """
-    logger.info(
-        f"[WORKFLOW] Starting scouting flow for user={state.user_id}, "
-        f"session={state.session_id}"
-    )
-
-    emit_workflow_event(
-        config,
-        "agent_start",
-        {"agent_name": "scouting"},
-    )
-
-    # Pre-check: User must have documents
-    if not check_user_has_documents(state.user_id):
-        logger.warning(f"[WORKFLOW] User {state.user_id} has no documents")
-        return AgentResponse(
-            type="answer",
-            reply=(
-                "I cannot generate a scouting report because you haven't uploaded "
-                "any documents yet. Please upload scouting documents, player profiles, "
-                "or related materials first, then try again."
-            ),
-            agent_name="scouting",
-        )
-
-    # =========================================================================
-    # Node 1: Intake and Route (Step 1)
-    # =========================================================================
-    emit_workflow_event(
-        config,
-        "plan_step_progress",
-        {
-            "step_index": 0,
-            "total_steps": 0,
-            "status": "in_progress",
-            "step_name": "Analyzing request and identifying player",
-        },
-    )
-
-    try:
-        intake_result: IntakeResult = intake_and_route_scouting(
-            message=state.message,
+    if state.player_fields:
+        report_draft = compose_report(
+            player_fields=state.player_fields,
+            raw_facts=state.raw_facts,
+            coverage=state.coverage or Coverage(found=[], missing=[]),
+            feedback=feedback,
             api_key=state.api_key,
         ).result()
 
-        state.player_name = intake_result.player_name
-        state.sport_guess = intake_result.sport_guess
+        state.report_draft = report_draft
+        source_doc_ids = list(set(chunk.doc_id for chunk in state.all_chunks))
+        state.preview = prepare_preview(
+            report_draft=report_draft,
+            source_doc_ids=source_doc_ids,
+        ).result()
 
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": 0,
-                "total_steps": 0,
-                "status": "completed",
-                "step_name": "Analyzing request and identifying player",
-                "result": f"Identified: {state.player_name} ({state.sport_guess})",
-            },
-        )
+        return {"success": True}
 
-        logger.info(
-            f"[WORKFLOW] Node 1 complete: player={state.player_name}, "
-            f"sport={state.sport_guess}"
-        )
-    except ValueError as e:
-        return AgentResponse(
-            type="answer",
-            reply=str(e),
-            agent_name="scouting",
-            clarification=str(e),
-        )
+    return {"success": False, "error": "No player data to update"}
 
-    # =========================================================================
-    # Node 2: Draft Plan (Step 2)
-    # =========================================================================
+
+def execute_save_player_step(
+    step: PlanStep,
+    state: WorkflowState,
+    config: Optional[RunnableConfig],
+) -> Dict[str, Any]:
+    """
+    Execute a save_player step.
+
+    This triggers HITL Gate B for player approval.
+    """
+    logger.info(f"[WORKFLOW] Executing save_player")
+
+    if not state.preview or not state.report_draft:
+        return {"success": False, "error": "No report to save"}
+
+    # Emit player preview event
     emit_workflow_event(
         config,
-        "plan_step_progress",
+        "player_preview",
         {
-            "step_index": 1,
-            "total_steps": 0,
-            "status": "in_progress",
-            "step_name": "Drafting scouting plan",
+            "player_fields": state.preview.player.model_dump(exclude_none=True),
+            "report_summary": state.report_draft.report_summary,
+            "report_text": state.report_draft.report_text,
+            "db_payload_preview": state.preview.model_dump(exclude_none=True),
         },
     )
 
-    plan_result: PlanProposal = draft_plan(
-        player_name=state.player_name,
-        sport_guess=state.sport_guess,
-        api_key=state.api_key,
-    ).result()
-
-    state.plan_steps = plan_result.plan_steps
-    state.query_hints = plan_result.query_hints
-
-    emit_workflow_event(
-        config,
-        "plan_step_progress",
-        {
-            "step_index": 1,
-            "total_steps": len(state.plan_steps),
-            "status": "completed",
-            "step_name": "Drafting scouting plan",
-            "result": f"Generated {len(state.plan_steps)} steps",
-        },
-    )
-
-    emit_workflow_event(
-        config,
-        "plan_proposal",
-        {
-            "player_name": state.player_name,
-            "sport_guess": state.sport_guess,
-            "plan_steps": state.plan_steps,
-            "query_hints": state.query_hints,
-        },
-    )
-
-    logger.info(f"[WORKFLOW] Node 2 complete: {len(state.plan_steps)} steps")
-
-    # =========================================================================
-    # HITL Gate A: Plan Approval
-    # =========================================================================
-    plan_decision = request_plan_approval(
-        player_name=state.player_name,
-        sport_guess=state.sport_guess,
-        plan_steps=state.plan_steps,
-        query_hints=state.query_hints,
+    # HITL Gate B
+    decision = request_player_approval(
+        preview=state.preview,
+        report_draft=state.report_draft,
         session_id=state.session_id,
     )
 
-    # Update state with any edits
-    if plan_decision.get("edited"):
-        state.plan_steps = plan_decision.get("plan_steps", state.plan_steps)
-        state.query_hints = plan_decision.get("query_hints", state.query_hints)
-        logger.info("[WORKFLOW] Plan updated from user edits")
+    action = decision.get("action", "approve")
 
-    # =========================================================================
-    # Edit Loop: Nodes 3-7 with potential re-runs
-    # =========================================================================
-    total_steps = len(state.plan_steps)
-    action = "approve"  # Default action for loop control
-
-    while state.edit_iterations < MAX_EDIT_ITERATIONS:
-        state.edit_iterations += 1
-
-        # ---------------------------------------------------------------------
-        # Node 3: Build Queries (Step 3)
-        # ---------------------------------------------------------------------
-        current_step = 2
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "in_progress",
-                "step_name": "Building search queries",
-            },
-        )
-
-        state.queries = build_queries(
-            player_name=state.player_name,
-            sport_guess=state.sport_guess,
-            query_hints=state.query_hints,
-            api_key=state.api_key,
-        ).result()
-
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "completed",
-                "step_name": "Building search queries",
-                "result": f"Generated {len(state.queries)} queries",
-            },
-        )
-
-        logger.info(f"[WORKFLOW] Node 3 complete: {len(state.queries)} queries")
-
-        # ---------------------------------------------------------------------
-        # Node 4: Retrieve Evidence (Step 4)
-        # ---------------------------------------------------------------------
-        current_step = 3
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "in_progress",
-                "step_name": "Retrieving evidence from documents",
-            },
-        )
-
-        state.evidence_pack = retrieve_evidence(
-            user_id=state.user_id,
-            queries=state.queries,
-            api_key=state.api_key,
-        ).result()
-
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "completed",
-                "step_name": "Retrieving evidence from documents",
-                "result": f"Found {len(state.evidence_pack.chunks)} chunks, confidence={state.evidence_pack.confidence}",
-            },
-        )
-
-        logger.info(
-            f"[WORKFLOW] Node 4 complete: {len(state.evidence_pack.chunks)} chunks, "
-            f"confidence={state.evidence_pack.confidence}"
-        )
-
-        # ---------------------------------------------------------------------
-        # Node 5: Extract Fields (Step 5)
-        # ---------------------------------------------------------------------
-        current_step = 4
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "in_progress",
-                "step_name": "Extracting player attributes",
-            },
-        )
-
-        player_fields, raw_facts, coverage = extract_fields(
-            evidence_pack=state.evidence_pack,
-            player_name=state.player_name,
-            sport_guess=state.sport_guess,
-            api_key=state.api_key,
-        ).result()
-
-        state.player_fields = player_fields
-        state.raw_facts = raw_facts
-        state.coverage = coverage
-
-        emit_workflow_event(
-            config,
-            "plan_step_progress",
-            {
-                "step_index": current_step,
-                "total_steps": total_steps,
-                "status": "completed",
-                "step_name": "Extracting player attributes",
-                "result": f"Extracted {len(state.raw_facts)} facts",
-            },
-        )
-
-        emit_workflow_event(
-            config,
-            "coverage_report",
-            {
-                "found": state.coverage.found if state.coverage else [],
-                "missing": state.coverage.missing if state.coverage else [],
-                "confidence": state.evidence_pack.confidence
-                if state.evidence_pack
-                else "low",
-                "chunk_count": len(state.evidence_pack.chunks)
-                if state.evidence_pack
-                else 0,
-            },
-        )
-
-        logger.info(
-            f"[WORKFLOW] Node 5 complete: {len(state.raw_facts)} facts extracted"
-        )
-
-        # Inner loop for compose-only re-runs
-        compose_feedback = None
-        while True:
-            # -----------------------------------------------------------------
-            # Node 6: Compose Report (Step 6)
-            # -----------------------------------------------------------------
-            current_step = 5
-            emit_workflow_event(
-                config,
-                "plan_step_progress",
-                {
-                    "step_index": current_step,
-                    "total_steps": total_steps,
-                    "status": "in_progress",
-                    "step_name": "Composing scouting report",
-                },
-            )
-
-            state.report_draft = compose_report(
-                player_fields=state.player_fields,
-                raw_facts=state.raw_facts,
-                coverage=state.coverage,
-                feedback=compose_feedback,
-                api_key=state.api_key,
-            ).result()
-
-            emit_workflow_event(
-                config,
-                "plan_step_progress",
-                {
-                    "step_index": current_step,
-                    "total_steps": total_steps,
-                    "status": "completed",
-                    "step_name": "Composing scouting report",
-                    "result": f"Generated {len(state.report_draft.report_text)} characters",
-                },
-            )
-
-            logger.info(
-                f"[WORKFLOW] Node 6 complete: "
-                f"{len(state.report_draft.report_text)} chars"
-            )
-
-            # -----------------------------------------------------------------
-            # Node 7: Prepare Preview (Step 7)
-            # -----------------------------------------------------------------
-            current_step = 6
-            emit_workflow_event(
-                config,
-                "plan_step_progress",
-                {
-                    "step_index": current_step,
-                    "total_steps": total_steps,
-                    "status": "in_progress",
-                    "step_name": "Preparing preview for approval",
-                },
-            )
-
-            source_doc_ids = list(
-                set(chunk.doc_id for chunk in state.evidence_pack.chunks)
-            )
-
-            state.preview = prepare_preview(
-                report_draft=state.report_draft,
-                source_doc_ids=source_doc_ids,
-            ).result()
-
-            emit_workflow_event(
-                config,
-                "plan_step_progress",
-                {
-                    "step_index": current_step,
-                    "total_steps": total_steps,
-                    "status": "completed",
-                    "step_name": "Preparing preview for approval",
-                    "result": "Preview ready",
-                },
-            )
-
-            logger.info("[WORKFLOW] Node 7 complete: preview ready")
-
-            preview_payload = {
-                "player_fields": state.preview.player.model_dump(exclude_none=True),
-                "report_summary": state.report_draft.report_summary,
-                "report_text": state.report_draft.report_text,
-                "db_payload_preview": state.preview.model_dump(exclude_none=True),
-            }
-            emit_workflow_event(config, "player_preview", preview_payload)
-
-            # -----------------------------------------------------------------
-            # HITL Gate B: Player Approval
-            # -----------------------------------------------------------------
-            player_decision = request_player_approval(
+    if action == "approve":
+        try:
+            write_result = write_player_item(
                 preview=state.preview,
-                report_summary=state.report_draft.report_summary,
-                report_text=state.report_draft.report_text,
-                session_id=state.session_id,
+                user_id=state.user_id,
+                run_id=state.run_id,
+                request_text=state.message,
+            ).result()
+
+            state.player_record_id = write_result.player_id
+            state.report_id = write_result.report_id
+            state.saved = True
+
+            return {
+                "success": True,
+                "player_id": write_result.player_id,
+                "report_id": write_result.report_id,
+            }
+        except Exception as e:
+            logger.error(f"[WORKFLOW] Failed to save: {e}")
+            return {"success": False, "error": str(e)}
+
+    elif action == "reject":
+        state.saved = False
+        return {"success": True, "rejected": True}
+
+    return {"success": False, "error": f"Unknown action: {action}"}
+
+
+def execute_answer_step(
+    step: PlanStep,
+    state: WorkflowState,
+    config: Optional[RunnableConfig],
+) -> Dict[str, Any]:
+    """Execute an answer step - generates final response."""
+    logger.info("[WORKFLOW] Executing answer step")
+    # Answer generation happens after plan execution
+    return {"success": True}
+
+
+# ============================================================================
+# PLAN EXECUTION
+# ============================================================================
+
+
+def execute_plan_steps(
+    state: WorkflowState,
+    config: Optional[RunnableConfig],
+) -> List[Dict[str, Any]]:
+    """
+    Execute all steps in the plan sequentially.
+
+    Skips steps that have already been completed (tracked in state.completed_steps).
+    This is important for resume after HITL Gate B - we don't want to re-run
+    steps 1-6 when resuming from step 7.
+
+    Returns list of step results.
+    """
+    if not state.plan:
+        return []
+
+    step_results = []
+    total_steps = len(state.plan.steps)
+
+    for idx, step in enumerate(state.plan.steps):
+        # Skip already completed steps (for resume scenarios)
+        if idx in state.completed_steps:
+            logger.info(
+                f"[WORKFLOW] Step {idx + 1}/{total_steps}: {step.action} - SKIPPED (already completed)"
+            )
+            # Emit completed status for UI consistency
+            emit_workflow_event(
+                config,
+                "plan_step_progress",
+                {
+                    "step_index": idx,
+                    "total_steps": total_steps,
+                    "status": "completed",
+                    "step_name": step.description,
+                    "action": step.action,
+                },
+            )
+            continue
+
+        logger.info(
+            f"[WORKFLOW] Step {idx + 1}/{total_steps}: {step.action} - {step.description}"
+        )
+
+        # Emit step start
+        emit_workflow_event(
+            config,
+            "plan_step_progress",
+            {
+                "step_index": idx,
+                "total_steps": total_steps,
+                "status": "in_progress",
+                "step_name": step.description,
+                "action": step.action,
+            },
+        )
+
+        try:
+            # Execute based on action type
+            if step.action == "rag_search":
+                result = execute_rag_search_step(step, state, config)
+            elif step.action == "extract_player":
+                result = execute_extract_player_step(step, state, config)
+            elif step.action == "compose_report":
+                result = execute_compose_report_step(step, state, config)
+            elif step.action == "update_report":
+                result = execute_update_report_step(step, state, config)
+            elif step.action == "save_player":
+                result = execute_save_player_step(step, state, config)
+            elif step.action == "answer":
+                result = execute_answer_step(step, state, config)
+            else:
+                result = {"success": False, "error": f"Unknown action: {step.action}"}
+
+            step_results.append({"step": idx, "action": step.action, **result})
+
+            # Mark step as completed (important for resume after HITL gates)
+            state.completed_steps.append(idx)
+
+            # Emit step complete
+            emit_workflow_event(
+                config,
+                "plan_step_progress",
+                {
+                    "step_index": idx,
+                    "total_steps": total_steps,
+                    "status": "completed",
+                    "step_name": step.description,
+                    "action": step.action,
+                },
             )
 
-            action = player_decision.get("action", "approve")
-            feedback = player_decision.get("feedback")
+        except GraphInterrupt:
+            # Re-raise GraphInterrupt so HITL gates work properly
+            # This allows save_player step to pause for player approval
+            raise
+        except Exception as e:
+            logger.error(f"[WORKFLOW] Step {idx} failed: {e}", exc_info=True)
+            step_results.append(
+                {
+                    "step": idx,
+                    "action": step.action,
+                    "success": False,
+                    "error": str(e),
+                }
+            )
+            emit_workflow_event(
+                config,
+                "plan_step_progress",
+                {
+                    "step_index": idx,
+                    "total_steps": total_steps,
+                    "status": "error",
+                    "step_name": step.description,
+                    "error": str(e),
+                },
+            )
 
-            if action == "approve":
-                # ---------------------------------------------------------
-                # Node 8: Write Player Item
-                # ---------------------------------------------------------
-                try:
-                    write_result: CreatePlayerWithReportResponse = write_player_item(
-                        preview=state.preview,
-                        user_id=state.user_id,
-                        run_id=state.run_id,
-                        request_text=state.message,
-                    ).result()
+    return step_results
 
-                    state.player_record_id = write_result.player_id
-                    state.report_id = write_result.report_id
-                    state.saved = True
 
-                    logger.info(
-                        f"[WORKFLOW] Node 8 complete: player={state.player_record_id}"
+def generate_final_response(state: WorkflowState) -> AgentResponse:
+    """Generate final response based on plan intent and results."""
+
+    intent = state.plan.intent if state.plan else "general_chat"
+
+    if intent == "scouting_report":
+        if state.saved and state.report_draft:
+            return AgentResponse(
+                type="answer",
+                reply=(
+                    f"I've created and saved the scouting report for {state.plan.player_name}.\n\n"
+                    f"**Summary:**\n"
+                    + "\n".join(
+                        f"- {point}" for point in state.report_draft.report_summary[:5]
                     )
-                except Exception as e:
-                    logger.error(f"[WORKFLOW] Node 8 failed: {e}")
-                    state.saved = False
+                ),
+                agent_name="scouting",
+            )
+        elif state.report_draft:
+            return AgentResponse(
+                type="answer",
+                reply=(
+                    f"Here's the scouting report for {state.plan.player_name} (not saved):\n\n"
+                    f"{state.report_draft.report_text}"
+                ),
+                agent_name="scouting",
+            )
+        else:
+            return AgentResponse(
+                type="answer",
+                reply="I couldn't generate a complete scouting report. Please try again with more specific information.",
+                agent_name="scouting",
+            )
 
-                break
+    elif intent == "info_query":
+        if state.answer_context:
+            # Use LLM to synthesize answer from context
+            # For now, return the raw context
+            return AgentResponse(
+                type="answer",
+                reply=f"Based on the documents I found:\n{state.answer_context}",
+                agent_name="search",
+            )
+        else:
+            return AgentResponse(
+                type="answer",
+                reply="I couldn't find relevant information in your documents.",
+                agent_name="search",
+            )
 
-            elif action == "reject":
-                state.saved = False
-                logger.info("[WORKFLOW] User rejected save, returning report only")
-                break
+    elif intent == "update_report":
+        if state.saved:
+            return AgentResponse(
+                type="answer",
+                reply="The report has been updated successfully.",
+                agent_name="scouting",
+            )
+        else:
+            return AgentResponse(
+                type="answer",
+                reply="The report update was not saved.",
+                agent_name="scouting",
+            )
 
-            elif action == "edit_wording":
-                compose_feedback = feedback
-                logger.info("[WORKFLOW] Re-running compose with wording feedback")
-                continue
-
-            elif action == "edit_content":
-                if feedback:
-                    state.query_hints.append(feedback)
-                logger.info(
-                    "[WORKFLOW] Re-running from build_queries with content feedback"
-                )
-                break
-
-            else:
-                logger.warning(
-                    f"[WORKFLOW] Unknown action: {action}, defaulting to approve"
-                )
-                state.saved = False
-                break
-
-        if action in ("approve", "reject"):
-            break
-
-    # =========================================================================
-    # Node 9: Build Final Response
-    # =========================================================================
-    response = build_final_response(
-        report_draft=state.report_draft,
-        player_record_id=state.player_record_id,
-        report_id=state.report_id,
-        saved=state.saved,
-        coverage=state.coverage,
-        player_name=state.player_name,
-    ).result()
-
-    logger.info(
-        f"[WORKFLOW] Scouting complete: saved={state.saved}, "
-        f"iterations={state.edit_iterations}"
-    )
-
-    return response
+    else:
+        # general_chat
+        return AgentResponse(
+            type="answer",
+            reply="How can I help you with scouting today?",
+            agent_name="greeter",
+        )
 
 
 # ============================================================================
 # MAIN WORKFLOW ENTRYPOINT
 # ============================================================================
 
-# Get checkpointer for workflow
 _workflow_checkpointer = None
 try:
     _workflow_checkpointer = get_sync_checkpointer()
@@ -998,25 +648,15 @@ def agent_workflow(
     """
     Unified agent workflow entrypoint.
 
-    Handles all agent types through supervisor routing:
-    - greeter: Friendly LLM greeting
-    - search: RAG + LLM document search
-    - scouting: Full 9-node scouting flow with HITL gates
-
-    Request can be:
-        - Dict with message, user_id, session_id, api_key, run_id
-        - AgentRequest Pydantic model (will be converted to dict)
-        - Command for resume from interrupt
-
-    When resuming from interrupt, LangGraph handles Command internally.
-
-    Args:
-        request: Request dict or Command for resume
-
-    Returns:
-        AgentResponse with agent's reply
+    Flow:
+    1. Parse request
+    2. Generate dynamic plan based on intent
+    3. HITL Gate A: Plan approval (Accept/Reject)
+    4. Execute plan steps sequentially
+    5. HITL Gate B: Player approval (if save_player step)
+    6. Return final response
     """
-    # Handle Command for resume (LangGraph handles checkpoint restore)
+    # Handle Command for resume
     if isinstance(request, Command):
         logger.info("[WORKFLOW] Resuming from interrupt via Command")
         resume_payload = (
@@ -1026,13 +666,13 @@ def agent_workflow(
         )
         session_id = resume_payload.get("session_id")
         if not session_id:
-            logger.error("[WORKFLOW] Resume missing session_id")
             return AgentResponse(
                 type="answer",
                 reply="Error: Resume requires session context",
                 agent_name="system",
             )
 
+        # Load context from session
         user_id = 0
         message_text = ""
         try:
@@ -1073,17 +713,14 @@ def agent_workflow(
             "run_id": None,
         }
 
-    # Handle AgentRequest Pydantic model - convert to dict for uniform access
+    # Parse request
     if hasattr(request, "model_dump"):
-        # Pydantic v2
         request_dict = request.model_dump()
     elif hasattr(request, "dict"):
-        # Pydantic v1
         request_dict = request.dict()
     elif isinstance(request, dict):
         request_dict = request
     else:
-        # Fallback - try to access attributes directly
         request_dict = {
             "user_id": getattr(request, "user_id", 0),
             "session_id": getattr(request, "session_id", 0),
@@ -1092,19 +729,13 @@ def agent_workflow(
             "run_id": getattr(request, "run_id", None),
         }
 
-    # Map 'query' to 'message' if present (AgentRequest uses 'query')
-    if "query" in request_dict and "message" not in request_dict:
+    # Normalize field names
+    if "query" in request_dict and not request_dict.get("message"):
         request_dict["message"] = request_dict["query"]
-    elif "query" in request_dict and not request_dict.get("message"):
-        request_dict["message"] = request_dict["query"]
-
-    # Map 'openai_api_key' to 'api_key' if present
-    if "openai_api_key" in request_dict and "api_key" not in request_dict:
-        request_dict["api_key"] = request_dict["openai_api_key"] or ""
-    elif "openai_api_key" in request_dict and not request_dict.get("api_key"):
+    if "openai_api_key" in request_dict and not request_dict.get("api_key"):
         request_dict["api_key"] = request_dict["openai_api_key"] or ""
 
-    # Extract request parameters
+    # Initialize state
     state = WorkflowState(
         user_id=request_dict.get("user_id", 0),
         session_id=request_dict.get("session_id", 0),
@@ -1115,81 +746,123 @@ def agent_workflow(
 
     logger.info(
         f"[WORKFLOW] Starting workflow for user={state.user_id}, "
-        f"session={state.session_id}, message_preview={state.message[:50]}..."
+        f"session={state.session_id}, message={state.message[:50]}..."
     )
 
+    # Check for documents
+    if not check_user_has_documents(state.user_id):
+        return AgentResponse(
+            type="answer",
+            reply=(
+                "I don't have any documents to search through yet. "
+                "Please upload some documents first, then I can help you."
+            ),
+            agent_name="system",
+        )
+
     # =========================================================================
-    # Node 0: Supervisor Routing
+    # Step 1: Generate Plan
     # =========================================================================
     emit_workflow_event(
         config,
-        "plan_step_progress",
+        "workflow_status",
         {
-            "step_index": -1,
-            "total_steps": 0,
+            "phase": "planning",
             "status": "in_progress",
-            "step_name": "Analyzing request",
+            "message": "Analyzing request and generating plan",
         },
     )
 
-    # Build messages for routing
-    messages = [HumanMessage(content=state.message)]
-
-    # Route to appropriate agent
-    routing: RoutingDecision = route_to_agent(
-        messages=messages,
-        config=config,
+    plan = generate_plan(
+        message=state.message,
+        player_name=None,  # Let planner detect
+        sport_guess=None,
         api_key=state.api_key,
     ).result()
 
-    state.routed_agent = routing.agent
-    state.routing_confidence = routing.confidence or 0.0
+    state.plan = plan
 
     logger.info(
-        f"[WORKFLOW] Supervisor routed to: {routing.agent} "
-        f"(confidence={state.routing_confidence:.2f})"
+        f"[WORKFLOW] Generated plan: intent={plan.intent}, "
+        f"player={plan.player_name}, steps={len(plan.steps)}"
     )
 
     emit_workflow_event(
         config,
-        "plan_step_progress",
+        "workflow_status",
         {
-            "step_index": -1,
-            "total_steps": 0,
+            "phase": "planning",
             "status": "completed",
-            "step_name": "Analyzing request",
-            "result": f"Routed to {routing.agent}",
+            "message": "Plan generated",
         },
     )
 
-    # Handle clarification request
-    if routing.require_clarification and routing.clarification_question:
+    # Emit plan proposal for frontend
+    emit_workflow_event(
+        config,
+        "plan_proposal",
+        {
+            "intent": plan.intent,
+            "player_name": plan.player_name,
+            "sport_guess": plan.sport_guess,
+            "reasoning": plan.reasoning,
+            "steps": [
+                {
+                    "action": step.action,
+                    "description": step.description,
+                }
+                for step in plan.steps
+            ],
+        },
+    )
+
+    # =========================================================================
+    # Step 2: HITL Gate A - Plan Approval
+    # =========================================================================
+    plan_decision = request_plan_approval(plan, state.session_id)
+
+    if not plan_decision.get("approved", True):
+        logger.info("[WORKFLOW] Plan rejected by user")
         return AgentResponse(
             type="answer",
-            reply=routing.clarification_question,
-            clarification=routing.clarification_question,
-            agent_name="supervisor",
+            reply="Plan was rejected. Please let me know how I can help differently.",
+            agent_name="system",
         )
 
     # =========================================================================
-    # Route to appropriate handler
+    # Step 3: Execute Plan Steps
     # =========================================================================
-    if routing.agent == "greeter":
-        return handle_greeter_route(state, messages, config)
+    emit_workflow_event(
+        config,
+        "workflow_status",
+        {
+            "phase": "execution",
+            "status": "in_progress",
+            "message": "Executing plan",
+        },
+    )
 
-    elif routing.agent == "search":
-        return handle_search_route(state, messages, config)
+    step_results = execute_plan_steps(state, config)
 
-    elif routing.agent == "scouting":
-        return run_scouting_flow(state, config)
+    emit_workflow_event(
+        config,
+        "workflow_status",
+        {
+            "phase": "execution",
+            "status": "completed",
+            "message": "Plan execution complete",
+        },
+    )
 
-    else:
-        # Fallback to greeter for unknown agents
-        logger.warning(
-            f"[WORKFLOW] Unknown agent {routing.agent}, falling back to greeter"
-        )
-        return handle_greeter_route(state, messages, config)
+    # =========================================================================
+    # Step 4: Generate Final Response
+    # =========================================================================
+    response = generate_final_response(state)
+
+    logger.info(f"[WORKFLOW] Complete: intent={plan.intent}, saved={state.saved}")
+
+    return response
 
 
-# Legacy alias for backward compatibility
+# Legacy alias
 scouting_workflow = agent_workflow

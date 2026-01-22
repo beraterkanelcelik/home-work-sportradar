@@ -100,14 +100,22 @@ export default function MessageList({
     return true
   })
 
-  if (uniqueMessages.length === 0) {
+  // Sort messages by created_at timestamp to ensure proper ordering
+  // This fixes status messages appearing at wrong positions
+  const sortedMessages = [...uniqueMessages].sort((a, b) => {
+    const timeA = new Date(a.created_at).getTime()
+    const timeB = new Date(b.created_at).getTime()
+    return timeA - timeB
+  })
+
+  if (sortedMessages.length === 0) {
     return null
   }
 
   return (
     <div className="max-w-full sm:max-w-3xl mx-auto px-2 sm:px-4 py-4 sm:py-8">
       <div className="space-y-4 sm:space-y-6">
-        {uniqueMessages.map((msg: Message) => (
+        {sortedMessages.map((msg: Message) => (
           <MessageItem
             key={msg.id}
             message={msg}

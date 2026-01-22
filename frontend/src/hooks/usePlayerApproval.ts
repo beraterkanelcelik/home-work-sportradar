@@ -22,12 +22,17 @@ interface UsePlayerApprovalProps {
   currentSession: { id: number } | null
   updateMessages: (updater: (messages: Message[]) => Message[]) => void
   loadMessages: (sessionId: number) => Promise<void>
+  /** Callback to open a new SSE stream after approval to receive execution events.
+   *  Accepts optional planMessageId for consistency with plan approval.
+   */
+  onResumeStream?: (planMessageId?: number) => void
 }
 
 export function usePlayerApproval({
   currentSession,
   updateMessages,
   loadMessages,
+  onResumeStream,
 }: UsePlayerApprovalProps) {
   const [approvingPlayers, setApprovingPlayers] = useState<Set<number>>(new Set())
 
@@ -64,8 +69,23 @@ export function usePlayerApproval({
         toast.success('Player approved - saving to database...')
         console.log(`[PLAYER_APPROVAL] Player approved successfully: message=${messageId}`)
 
-        // Reload messages to get saved player
-        await loadMessages(currentSession.id)
+        // Mark the player preview as approved
+        updateMessages((messages) =>
+          messages.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, player_preview_status: 'approved' as const }
+              : msg
+          )
+        )
+
+        // Open resume stream to receive final response after save
+        if (onResumeStream) {
+          console.log(`[PLAYER_APPROVAL] Triggering resume stream`)
+          onResumeStream()
+        } else {
+          // Fallback: reload messages to get saved player
+          await loadMessages(currentSession.id)
+        }
       } else {
         toast.error(response.data.error || 'Player approval failed')
       }
@@ -79,7 +99,7 @@ export function usePlayerApproval({
         return next
       })
     }
-  }, [currentSession, updateMessages, loadMessages, approvingPlayers])
+  }, [currentSession, updateMessages, loadMessages, approvingPlayers, onResumeStream])
 
   /**
    * Reject player proposal
@@ -108,6 +128,15 @@ export function usePlayerApproval({
 
       if (response.data.success) {
         toast.info('Player proposal rejected')
+        
+        // Mark the player preview as rejected
+        updateMessages((messages) =>
+          messages.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, player_preview_status: 'rejected' as const }
+              : msg
+          )
+        )
       } else {
         toast.error(response.data.error || 'Failed to reject player')
       }
@@ -154,6 +183,12 @@ export function usePlayerApproval({
       if (response.data.success) {
         toast.success('Re-running report composition...')
         console.log(`[PLAYER_APPROVAL] Edit wording initiated: message=${messageId}`)
+        
+        // Open resume stream to receive new player preview
+        if (onResumeStream) {
+          console.log(`[PLAYER_APPROVAL] Triggering resume stream for edit wording`)
+          onResumeStream()
+        }
       } else {
         toast.error(response.data.error || 'Failed to edit wording')
       }
@@ -167,7 +202,7 @@ export function usePlayerApproval({
         return next
       })
     }
-  }, [currentSession, approvingPlayers])
+  }, [currentSession, approvingPlayers, onResumeStream])
 
   /**
    * Edit content - re-run from build_queries with feedback
@@ -207,6 +242,12 @@ export function usePlayerApproval({
       if (response.data.success) {
         toast.success('Re-running evidence retrieval with new hints...')
         console.log(`[PLAYER_APPROVAL] Edit content initiated: message=${messageId}`)
+        
+        // Open resume stream to receive new player preview
+        if (onResumeStream) {
+          console.log(`[PLAYER_APPROVAL] Triggering resume stream for edit content`)
+          onResumeStream()
+        }
       } else {
         toast.error(response.data.error || 'Failed to edit content')
       }
@@ -220,7 +261,7 @@ export function usePlayerApproval({
         return next
       })
     }
-  }, [currentSession, approvingPlayers])
+  }, [currentSession, approvingPlayers, onResumeStream])
 
   return {
     handleApprovePlayer,

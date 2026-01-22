@@ -44,6 +44,8 @@ interface ChatSidebarProps {
   onRenameSession: (sessionId: number, currentTitle: string) => void
   /** Callback to delete a session */
   onDeleteSession: (sessionId: number, e?: React.MouseEvent) => void
+  /** Callback to delete all sessions */
+  onDeleteAllChats: () => void
   /** ID of session being renamed (null if none) */
   renameSessionId: number | null
   /** Title for session being renamed */
@@ -86,6 +88,7 @@ export default function ChatSidebar({
   onSelectSession,
   onRenameSession,
   onDeleteSession,
+  onDeleteAllChats,
   renameSessionId,
   renameSessionTitle,
   setRenameSessionTitle,
@@ -155,9 +158,21 @@ export default function ChatSidebar({
             </button>
           </div>
           {chatsSectionOpen && (
-            <Button onClick={handleNewChat} className="w-full" size="sm">
-              New Chat
-            </Button>
+            <div className="space-y-2">
+              <Button onClick={handleNewChat} className="w-full" size="sm">
+                New Chat
+              </Button>
+              {sessions.length > 0 && (
+                <Button 
+                  onClick={onDeleteAllChats} 
+                  variant="outline" 
+                  className="w-full text-destructive hover:text-destructive hover:bg-destructive/10" 
+                  size="sm"
+                >
+                  Delete All Chats
+                </Button>
+              )}
+            </div>
           )}
         </div>
 

@@ -750,8 +750,9 @@ def ai_agent_workflow(request: Union[AgentRequest, Command, Any]) -> AgentRespon
                     )
 
                 if routing.agent == "scouting":
-                    from app.agents.functional.scouting_workflow import (
-                        scouting_workflow,
+                    # Use new dynamic plan-driven workflow
+                    from app.agents.functional.agent_workflow import (
+                        agent_workflow as scouting_workflow,
                     )
 
                     scouting_request = (
@@ -1612,7 +1613,12 @@ def get_event_queue_from_config(config: Dict[str, Any]):
     Returns:
         Event queue if available, None otherwise
     """
-    return config.get("_event_queue")
+    # First check top-level (original location)
+    if config.get("_event_queue"):
+        return config.get("_event_queue")
+    # Also check configurable (for checkpoint preservation)
+    configurable = config.get("configurable", {})
+    return configurable.get("_event_queue")
 
 
 def is_scouting_resume_payload(payload: Dict[str, Any]) -> bool:
@@ -2037,7 +2043,17 @@ async def ai_agent_workflow_events(
         "load_messages_task": "Loading conversation history...",
         "check_summarization_needed_task": "Checking if summarization needed...",
         "save_message_task": "Saving message...",
-        # Scouting workflow tasks
+        # New dynamic scouting workflow tasks (agent_workflow.py)
+        "generate_plan": "Generating execution plan...",
+        "execute_rag_search_step": "Searching documents...",
+        "execute_extract_player_step": "Extracting player data...",
+        "execute_compose_report_step": "Composing scouting report...",
+        "execute_update_report_step": "Updating report...",
+        "execute_save_player_step": "Saving player record...",
+        "execute_answer_step": "Generating answer...",
+        "execute_plan_steps": "Executing plan steps...",
+        "generate_final_response": "Finalizing response...",
+        # Legacy scouting workflow tasks (for backward compatibility if needed)
         "intake_and_route_scouting": "Analyzing scouting request...",
         "draft_plan": "Drafting scouting plan...",
         "build_queries": "Building scouting queries...",
@@ -2140,7 +2156,9 @@ async def ai_agent_workflow_events(
             )
 
     # Add event_queue to config so it can be accessed in ai_agent_workflow for status updates
+    # Put it in both top-level and configurable to ensure it survives checkpoint/resume
     checkpoint_config["_event_queue"] = event_queue
+    checkpoint_config["configurable"]["_event_queue"] = event_queue
 
     # Track final response and interrupt - use list for thread-safe sharing
     final_response_holder = [None]

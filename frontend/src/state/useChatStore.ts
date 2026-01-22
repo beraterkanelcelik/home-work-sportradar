@@ -22,6 +22,7 @@ export interface Message {
   content: string
   tokens_used: number
   created_at: string
+  sender_type?: 'llm' | 'ui'  // 'llm' = included in LLM context, 'ui' = display only
   metadata?: {
     agent_name?: string
     tool_calls?: Array<Record<string, unknown>>
@@ -63,6 +64,8 @@ export interface Message {
     report_text: string
     db_payload_preview: Record<string, any>
   }
+  /** Player preview approval status - set after user approves/rejects */
+  player_preview_status?: 'approved' | 'rejected'
   coverage_report?: {
     found: string[]
     missing: string[]
@@ -156,6 +159,7 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
           content: msg.content,
           tokens_used: msg.tokens_used,
           created_at: msg.created_at,
+          sender_type: msg.sender_type || 'llm',  // Include sender_type from backend
           metadata: {
             // Ensure agent_name is always in metadata for display
             agent_name: metadata.agent_name,
@@ -171,6 +175,7 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
           // Extract top-level fields from metadata for easier access
           response_type: metadata.response_type,
           plan: metadata.plan,
+          plan_progress: metadata.plan_progress,
           clarification: metadata.clarification,
           raw_tool_outputs: metadata.raw_tool_outputs,
           // Note: status is transient (only during streaming), not persisted
@@ -191,17 +196,34 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
         return true
       })
       
-      // When loading messages for a session, clear all temporary status messages
-      // They are ephemeral and session-specific - should not persist across session switches
+      // When loading messages for a session, include all persisted messages
+      // including UI-only messages (plans, status updates) that were saved to the DB
       set((state: ChatState) => {
-        // Filter out any system status messages from DB (they shouldn't exist, but just in case)
-        const dbMessagesWithoutStatus = uniqueMessages.filter(
-          (msg: Message) => !(msg.role === 'system' && msg.metadata?.status_type === 'task_status')
+        // Preserve temporary status messages (negative IDs) that are currently in state
+        // These are ephemeral UI updates that should persist within the session
+        const existingStatusMessages = state.messages.filter(
+          (msg: Message) => 
+            msg.id < 0 && 
+            msg.role === 'system' && 
+            msg.metadata?.status_type === 'task_status'
         )
         
-        // Don't preserve temporary status messages when loading a new session
-        // They are ephemeral and should only exist during active streaming
-        return { messages: dbMessagesWithoutStatus }
+        // Merge: DB messages + preserved status messages
+        // Status messages should be inserted at their original relative positions
+        // For simplicity, we'll append them before the last assistant message
+        if (existingStatusMessages.length > 0 && uniqueMessages.length > 0) {
+          // Find the last assistant message index in the new messages
+          const lastAssistantIdx = uniqueMessages.map((m, i) => ({ m, i }))
+            .filter(({ m }) => m.role === 'assistant')
+            .pop()?.i ?? uniqueMessages.length
+          
+          // Insert status messages before the last assistant message
+          const result = [...uniqueMessages]
+          result.splice(lastAssistantIdx, 0, ...existingStatusMessages)
+          return { messages: result }
+        }
+        
+        return { messages: uniqueMessages }
       })
     } catch (error: unknown) {
       set({ error: getErrorMessage(error, 'Failed to load messages') })

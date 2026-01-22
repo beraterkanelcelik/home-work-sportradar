@@ -53,6 +53,16 @@ urlpatterns = [
         chats.chat_session_stats,
         name="chat_session_stats",
     ),
+    path(
+        "api/chats/<int:session_id>/ui-message/",
+        chats.save_ui_message,
+        name="save_ui_message",
+    ),
+    path(
+        "api/chats/<int:session_id>/ui-message/<int:message_id>/",
+        chats.update_ui_message,
+        name="update_ui_message",
+    ),
     # Documents
     path("api/documents/", documents.documents, name="documents"),
     path(
@@ -82,10 +92,21 @@ urlpatterns = [
     ),
     # Agent
     path("api/agent/stream/", agent.stream_agent, name="stream_agent"),
+    path("api/agent/stream-resume/", agent.stream_resume, name="stream_resume"),
     path("api/agent/approve-tool/", agent.approve_tool, name="approve_tool"),
     path("api/agent/approve-plan/", agent.approve_plan, name="approve_plan"),
     path("api/agent/approve-player/", agent.approve_player, name="approve_player"),
     path("api/scout-reports/", agent.list_scout_reports, name="list_scout_reports"),
+    path(
+        "api/scout-reports/delete-all/",
+        agent.delete_all_scout_reports,
+        name="delete_all_scout_reports",
+    ),
+    path(
+        "api/scout-reports/<str:report_id>/",
+        agent.delete_scout_report,
+        name="delete_scout_report",
+    ),
     # RAG
     path("api/rag/query/", rag.rag_query, name="rag_query"),
     # Models

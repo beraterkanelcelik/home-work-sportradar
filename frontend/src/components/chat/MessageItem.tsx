@@ -23,7 +23,7 @@
 import React from 'react'
 import type { Message } from '@/state/useChatStore'
 import MarkdownMessage from '@/components/MarkdownMessage'
-import PlanProposal, { type PlanProposalData } from '@/components/PlanProposal'
+import { type PlanProposalData } from '@/components/PlanProposal'
 import PlayerPreview, { type PlayerPreviewData } from '@/components/PlayerPreview'
 import CoverageReport, { type CoverageReportData } from '@/components/CoverageReport'
 import JsonViewer from '@/components/JsonViewer'
@@ -249,6 +249,8 @@ export default function MessageItem({
               onEditWording={() => onEditPlayerWording?.(message.id, message.player_preview!)}
               onEditContent={(feedback) => onEditPlayerContent?.(message.id, message.player_preview!, feedback)}
               isExecuting={approvingPlayers?.has(message.id)}
+              isCompleted={!!message.player_preview_status}
+              completedAction={message.player_preview_status}
             />
           </div>
         )}
@@ -313,21 +315,19 @@ export default function MessageItem({
                 {message.content}
               </p>
             ) : isPlanProposal && message.plan ? (
-              // Plan proposal rendering
-              <PlanProposal
-                plan={{
-                  ...message.plan,
-                  // Merge step statuses from plan_progress into plan steps
-                  plan: message.plan.plan.map((step, idx) => ({
-                    ...step,
-                    status: message.plan_progress?.steps_status?.[idx]?.status || step.status || 'pending'
-                  }))
-                }}
-                onApprove={() => onPlanApproval(message.id, message.plan!)}
-                onReject={() => onPlanRejection(message.id)}
-                isExecuting={isExecutingPlan}
-                currentStepIndex={message.plan_progress?.current_step_index ?? -1}
-              />
+              // Plan proposal - show simple message, full plan is in the PlanPanel
+              <div className="text-sm text-muted-foreground">
+                <p className="flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                  </svg>
+                  {isExecutingPlan ? (
+                    <span>Executing plan... see progress in the panel</span>
+                  ) : (
+                    <span>I've created a scouting plan with {message.plan.plan?.length || 0} steps. Please review it in the panel.</span>
+                  )}
+                </p>
+              </div>
             ) : hasClarification ? (
               // Clarification request rendering
               <div className="space-y-3">

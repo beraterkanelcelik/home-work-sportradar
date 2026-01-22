@@ -28,12 +28,20 @@ interface UsePlanApprovalProps {
   currentSession: { id: number } | null
   updateMessages: (updater: (messages: Message[]) => Message[]) => void
   setExecutingPlanMessageId: (id: number | null) => void
+  /** Callback to mark a plan as approved (persists across loadMessages) */
+  markPlanApproved?: (messageId: number) => void
+  /** Callback to open a new SSE stream after plan approval to receive execution events.
+   *  Accepts optional planMessageId to avoid race conditions with async state updates.
+   */
+  onResumeStream?: (planMessageId?: number) => void
 }
 
 export function usePlanApproval({
   currentSession,
   updateMessages,
   setExecutingPlanMessageId,
+  markPlanApproved,
+  onResumeStream,
 }: UsePlanApprovalProps) {
   const [approvingPlans, setApprovingPlans] = useState<Set<number>>(new Set())
 
@@ -56,6 +64,11 @@ export function usePlanApproval({
 
     setApprovingPlans(prev => new Set(prev).add(messageId))
     setExecutingPlanMessageId(messageId)
+    
+    // Mark plan as approved immediately (survives loadMessages)
+    if (markPlanApproved) {
+      markPlanApproved(messageId)
+    }
 
     try {
       const response = await agentAPI.approvePlan({
@@ -67,9 +80,15 @@ export function usePlanApproval({
 
       if (response.data.success) {
         toast.success('Plan approved - executing...')
-        console.log(`[PLAN_APPROVAL] Plan approved successfully: message=${messageId}, keeping connection open for results`)
-        // Keep setExecutingPlanMessageId set - don't clear it yet
-        // It will be cleared when the stream completes
+        console.log(`[PLAN_APPROVAL] Plan approved successfully: message=${messageId}, opening resume stream for results`)
+        
+        // Open a new SSE stream to receive execution events
+        // The original stream closed after the interrupt event
+        // Pass messageId directly to avoid race condition with async setExecutingPlanMessageId
+        if (onResumeStream) {
+          console.log(`[PLAN_APPROVAL] Triggering resume stream with messageId=${messageId}`)
+          onResumeStream(messageId)
+        }
       } else {
         toast.error(response.data.error || 'Plan approval failed')
         setExecutingPlanMessageId(null)
@@ -85,7 +104,7 @@ export function usePlanApproval({
         return next
       })
     }
-  }, [currentSession, approvingPlans, setExecutingPlanMessageId])
+  }, [currentSession, approvingPlans, setExecutingPlanMessageId, markPlanApproved, onResumeStream])
 
   const handleRejectPlan = useCallback(async (messageId: number) => {
     if (!currentSession) {

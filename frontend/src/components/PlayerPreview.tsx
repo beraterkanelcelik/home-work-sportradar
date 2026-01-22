@@ -45,6 +45,10 @@ interface PlayerPreviewProps {
   onEditWording?: () => void
   onEditContent?: (feedback: string) => void
   isExecuting?: boolean
+  /** Whether the player has been approved/rejected (show collapsed summary) */
+  isCompleted?: boolean
+  /** The action taken: 'approved' | 'rejected' | undefined */
+  completedAction?: 'approved' | 'rejected'
 }
 
 export default function PlayerPreview({
@@ -53,7 +57,9 @@ export default function PlayerPreview({
   onReject,
   onEditWording,
   onEditContent,
-  isExecuting = false
+  isExecuting = false,
+  isCompleted = false,
+  completedAction,
 }: PlayerPreviewProps) {
   const [showFullReport, setShowFullReport] = useState(false)
   const [feedback, setFeedback] = useState('')
@@ -69,6 +75,46 @@ export default function PlayerPreview({
       onEditContent(feedback)
       setFeedback('')
     }
+  }
+
+  // Collapsed view for completed (approved/rejected) player previews
+  if (isCompleted) {
+    return (
+      <div className={`border rounded-lg p-3 ${completedAction === 'approved' ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'}`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-medium ${player.sport === 'nba' ? 'bg-blue-600' : player.sport === 'football' ? 'bg-green-600' : 'bg-gray-600'}`}>
+              {player.sport === 'nba' ? '🏀' : player.sport === 'football' ? '⚽' : '❓'}
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">{player.display_name}</div>
+              <div className="text-xs text-muted-foreground">
+                {formatSportName(player.sport)}
+                {player.positions && player.positions.length > 0 && ` • ${player.positions.join(', ')}`}
+                {player.teams && player.teams.length > 0 && ` • ${player.teams.join(', ')}`}
+              </div>
+            </div>
+          </div>
+          <div className={`flex items-center gap-2 text-sm font-medium ${completedAction === 'approved' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>
+            {completedAction === 'approved' ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Player Saved
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Rejected
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (

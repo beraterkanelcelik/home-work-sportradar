@@ -1,20 +1,27 @@
 """
 Scouting workflow task functions for LangGraph Functional API.
 
-These tasks implement the 9-node scouting report flow:
-1. intake_and_route_scouting - Parse request, extract player_name
-2. draft_plan - Generate 4-7 step plan
-3. build_queries - Generate 3-6 diversified queries
-4. retrieve_evidence - Multi-query RAG retrieval
-5. extract_fields - Extract structured player fields
-6. compose_report - Generate scouting report
-7. prepare_preview - Format for approval UI
-8. write_player_item - Create player + report in DB
-9. build_final_response - Assemble final response
+These tasks implement the dynamic plan-driven scouting workflow:
+
+Plan Generation:
+- generate_plan - Generate dynamic execution plan based on intent
+
+Execution Actions:
+- retrieve_evidence - RAG search (rag_search action)
+- extract_fields - Extract structured player data (extract_player action)
+- compose_report - Generate scouting report (compose_report action)
+- write_player_item - Save to database (save_player action)
+- build_final_response - Generate final response (answer action)
+
+Legacy (deprecated):
+- intake_and_route_scouting - Use supervisor routing instead
+- draft_plan - Use generate_plan instead
+- build_queries - Queries now generated in plan steps
+- prepare_preview - Merged into compose_report
 """
 
 from .intake import intake_and_route_scouting
-from .plan import draft_plan
+from .plan import draft_plan, generate_plan
 from .queries import build_queries
 from .retrieval import retrieve_evidence
 from .extraction import extract_fields
@@ -24,13 +31,17 @@ from .write import write_player_item
 from .response import build_final_response
 
 __all__ = [
-    "intake_and_route_scouting",
-    "draft_plan",
-    "build_queries",
+    # New dynamic plan
+    "generate_plan",
+    # Execution actions
     "retrieve_evidence",
     "extract_fields",
     "compose_report",
-    "prepare_preview",
     "write_player_item",
     "build_final_response",
+    # Legacy (deprecated)
+    "intake_and_route_scouting",
+    "draft_plan",
+    "build_queries",
+    "prepare_preview",
 ]

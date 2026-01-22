@@ -4,6 +4,7 @@ Pydantic schemas for the Scouting Report workflow.
 These schemas define contracts between nodes in the scouting workflow,
 matching the specifications in agentic-schemas.md.
 """
+
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Literal
 from dataclasses import dataclass, field
@@ -13,11 +14,16 @@ from dataclasses import dataclass, field
 # Physical & Scouting Attributes (nested in PlayerFields)
 # =============================================================================
 
+
 class PhysicalAttributes(BaseModel):
     """Physical measurements for a player (optional fields)."""
 
-    height_cm: Optional[int] = Field(None, ge=80, le=260, description="Height in centimeters")
-    weight_kg: Optional[int] = Field(None, ge=30, le=200, description="Weight in kilograms")
+    height_cm: Optional[int] = Field(
+        None, ge=80, le=260, description="Height in centimeters"
+    )
+    weight_kg: Optional[int] = Field(
+        None, ge=30, le=200, description="Weight in kilograms"
+    )
     measurements: Optional[Dict[str, Any]] = Field(
         None, description="Additional measurements e.g. wingspan_cm, hand_size_in"
     )
@@ -27,17 +33,22 @@ class ScoutingAttributes(BaseModel):
     """Scouting evaluation attributes (optional fields)."""
 
     strengths: Optional[List[str]] = Field(None, description="Player strengths")
-    weaknesses: Optional[List[str]] = Field(None, description="Player weaknesses/limitations")
+    weaknesses: Optional[List[str]] = Field(
+        None, description="Player weaknesses/limitations"
+    )
     style_tags: Optional[List[str]] = Field(
         None, description="Style descriptors e.g. '3PT shooter', 'POA defender'"
     )
     risk_notes: Optional[List[str]] = Field(None, description="Risk factors")
-    role_projection: Optional[str] = Field(None, description="Projected role description")
+    role_projection: Optional[str] = Field(
+        None, description="Projected role description"
+    )
 
 
 # =============================================================================
 # PlayerFields (Extractor output)
 # =============================================================================
+
 
 class PlayerFields(BaseModel):
     """
@@ -52,14 +63,20 @@ class PlayerFields(BaseModel):
     sport: Literal["nba", "football", "unknown"] = Field(..., description="Sport type")
 
     # Optional identity
-    positions: Optional[List[str]] = Field(None, min_length=1, description="Player positions")
+    positions: Optional[List[str]] = Field(
+        None, min_length=1, description="Player positions"
+    )
     teams: Optional[List[str]] = Field(None, description="Teams played for")
     league: Optional[str] = Field(None, description="League name")
     aliases: Optional[List[str]] = Field(None, description="Alternative names")
 
     # Nested optional attributes
-    physical: Optional[PhysicalAttributes] = Field(None, description="Physical measurements")
-    scouting: Optional[ScoutingAttributes] = Field(None, description="Scouting evaluation")
+    physical: Optional[PhysicalAttributes] = Field(
+        None, description="Physical measurements"
+    )
+    scouting: Optional[ScoutingAttributes] = Field(
+        None, description="Scouting evaluation"
+    )
 
     class Config:
         extra = "forbid"  # Disallow extra fields
@@ -68,6 +85,7 @@ class PlayerFields(BaseModel):
 # =============================================================================
 # EvidencePack (Retriever output)
 # =============================================================================
+
 
 class ChunkData(BaseModel):
     """A single retrieved chunk from vector search."""
@@ -81,8 +99,12 @@ class ChunkData(BaseModel):
 class Coverage(BaseModel):
     """Coverage report: what was found vs missing."""
 
-    found: List[str] = Field(default_factory=list, description="Fields with evidence found")
-    missing: List[str] = Field(default_factory=list, description="Fields without evidence")
+    found: List[str] = Field(
+        default_factory=list, description="Fields with evidence found"
+    )
+    missing: List[str] = Field(
+        default_factory=list, description="Fields without evidence"
+    )
 
 
 class EvidencePack(BaseModel):
@@ -93,12 +115,16 @@ class EvidencePack(BaseModel):
     and confidence assessment.
     """
 
-    queries: List[str] = Field(..., min_length=1, max_length=6, description="Queries executed")
+    queries: List[str] = Field(
+        ..., min_length=1, max_length=6, description="Queries executed"
+    )
     chunks: List[ChunkData] = Field(
         default_factory=list, max_length=40, description="Retrieved chunks (max 40)"
     )
     coverage: Coverage = Field(..., description="Coverage analysis")
-    confidence: Literal["low", "med", "high"] = Field(..., description="Confidence level")
+    confidence: Literal["low", "med", "high"] = Field(
+        ..., description="Confidence level"
+    )
 
     class Config:
         extra = "forbid"
@@ -107,6 +133,7 @@ class EvidencePack(BaseModel):
 # =============================================================================
 # ScoutingReportDraft (Composer output)
 # =============================================================================
+
 
 class ReportPayload(BaseModel):
     """Report data for database storage."""
@@ -136,7 +163,9 @@ class ScoutingReportDraft(BaseModel):
     report_summary: List[str] = Field(
         ..., min_length=3, max_length=12, description="Summary bullets (3-12)"
     )
-    db_payload_preview: DbPayloadPreview = Field(..., description="Database payload preview")
+    db_payload_preview: DbPayloadPreview = Field(
+        ..., description="Database payload preview"
+    )
 
     class Config:
         extra = "forbid"
@@ -145,6 +174,7 @@ class ScoutingReportDraft(BaseModel):
 # =============================================================================
 # One-Call Create API (DB Write Contract)
 # =============================================================================
+
 
 class CreatePlayerWithReportRequest(BaseModel):
     """Request to create player and scouting report in single transaction."""
@@ -166,6 +196,7 @@ class CreatePlayerWithReportResponse(BaseModel):
 # Workflow State and Intermediate Schemas
 # =============================================================================
 
+
 class IntakeResult(BaseModel):
     """Result from intake_and_route_scouting task."""
 
@@ -177,10 +208,83 @@ class IntakeResult(BaseModel):
 
 
 class PlanProposal(BaseModel):
-    """Plan proposal for HITL Gate A approval."""
+    """Plan proposal for HITL Gate A approval (DEPRECATED - use ExecutionPlan)."""
 
-    plan_steps: List[str] = Field(..., min_length=4, max_length=7, description="Plan steps")
-    query_hints: List[str] = Field(default_factory=list, description="Query hints for retrieval")
+    plan_steps: List[str] = Field(
+        ..., min_length=4, max_length=7, description="Plan steps"
+    )
+    query_hints: List[str] = Field(
+        default_factory=list, description="Query hints for retrieval"
+    )
+
+
+# =============================================================================
+# Dynamic Execution Plan (New Architecture)
+# =============================================================================
+
+
+class PlanStep(BaseModel):
+    """
+    Executable plan step.
+
+    Each step represents a concrete action the agent will take.
+    Steps are executed sequentially after user approval.
+    """
+
+    action: Literal[
+        "rag_search",  # Search user's documents
+        "extract_player",  # Extract structured player data from evidence
+        "compose_report",  # Generate scouting report from extracted data
+        "update_report",  # Update an existing saved report
+        "save_player",  # Save player + report to DB (triggers HITL Gate B)
+        "answer",  # Generate final response from context
+    ] = Field(..., description="Action type to execute")
+
+    description: str = Field(
+        ..., min_length=1, description="Human-readable step description for UI"
+    )
+
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Action-specific parameters (e.g., query for rag_search)",
+    )
+
+
+class ExecutionPlan(BaseModel):
+    """
+    Agent-generated dynamic execution plan.
+
+    The planner analyzes user intent and generates a plan with concrete steps.
+    Simple queries get 1-2 steps, full scouting reports get 5-7 steps.
+    """
+
+    intent: Literal[
+        "info_query", "scouting_report", "update_report", "general_chat"
+    ] = Field(..., description="Detected intent type")
+
+    player_name: Optional[str] = Field(
+        None, description="Target player name (if applicable)"
+    )
+
+    sport_guess: Optional[Literal["nba", "football", "unknown"]] = Field(
+        None, description="Guessed sport type"
+    )
+
+    reasoning: str = Field(
+        ..., description="Brief explanation of why this plan was generated"
+    )
+
+    steps: List[PlanStep] = Field(
+        ..., min_length=1, max_length=10, description="Ordered list of steps to execute"
+    )
+
+    # For update_report intent
+    target_report_id: Optional[str] = Field(
+        None, description="ID of report to update (for update_report intent)"
+    )
+
+    class Config:
+        extra = "forbid"
 
 
 class ApprovalDecision(BaseModel):
@@ -189,7 +293,9 @@ class ApprovalDecision(BaseModel):
     action: Literal["approve", "reject", "edit_wording", "edit_content"] = Field(
         ..., description="User action"
     )
-    feedback: Optional[str] = Field(None, description="Optional feedback for edit actions")
+    feedback: Optional[str] = Field(
+        None, description="Optional feedback for edit actions"
+    )
 
 
 @dataclass
