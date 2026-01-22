@@ -132,6 +132,7 @@ async def stream_agent(request):
 
         chat_session_id = validated_request.chat_session_id
         message = validated_request.message
+        model = validated_request.model
         plan_steps = validated_request.plan_steps
         flow = validated_request.flow
         idempotency_key = validated_request.idempotency_key or str(uuid.uuid4())
@@ -164,7 +165,7 @@ async def stream_agent(request):
             return JsonResponse({"error": "message is required"}, status=400)
 
         logger.info(
-            f"Starting agent stream for user {user.id}, session {chat_session_id}, flow: {flow}"
+            f"Starting agent stream for user {user.id}, session {chat_session_id}, flow: {flow}, model: {model}"
         )
 
         # Save user message first (only if not plan execution)
@@ -263,6 +264,7 @@ async def stream_agent(request):
                                 "user_id": user.id,
                                 "session_id": chat_session_id,
                                 "message": message,
+                                "model": model,  # Model selected by user in chat UI
                                 "plan_steps": plan_steps,
                                 "flow": flow,
                                 "tenant_id": tenant_id,

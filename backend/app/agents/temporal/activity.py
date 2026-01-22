@@ -263,9 +263,10 @@ async def _run_chat_activity_async(
         # Extract message and other parameters
         message = state.get("message", "")
         session_id = state.get("session_id", chat_id)
+        model = state.get("model")
 
         logger.info(
-            f"[ACTIVITY_START] Starting activity for chat_id={chat_id}, message_preview={message[:50] if message else '(empty)'}..., user_id={user_id}, session_id={session_id}"
+            f"[ACTIVITY_START] Starting activity for chat_id={chat_id}, message_preview={message[:50] if message else '(empty)'}..., user_id={user_id}, session_id={session_id}, model={model}"
         )
 
         # Check if this is a resume operation (has resume_payload)
@@ -368,13 +369,17 @@ async def _run_chat_activity_async(
             )
         else:
             # Build request dict for StateGraph workflow
+            # Get model from state (selected by user in chat UI)
+            selected_model = state.get("model") or "gpt-4o-mini"
             request = {
                 "message": state.get("message", ""),
                 "session_id": chat_id,
                 "user_id": user_id,
                 "api_key": api_key_ctx.openai_api_key,
                 "run_id": state.get("run_id"),
+                "model": selected_model,
             }
+            logger.info(f"[ACTIVITY] Using model: {selected_model}")
 
         # Streaming mode: use .stream() and publish to Redis
         logger.info(f"[ACTIVITY] Executing in stream mode: session={chat_id}")
@@ -535,7 +540,9 @@ async def _run_chat_activity_async(
                         try:
                             from asgiref.sync import sync_to_async
                             from app.services.chat_service import add_message
-                            from app.agents.config import OPENAI_MODEL
+
+                            # Get model from state (selected by user in chat UI)
+                            used_model = state.get("model") or "gpt-4o-mini"
 
                             # Extract message data from response
                             content = (
@@ -561,7 +568,7 @@ async def _run_chat_activity_async(
                                         "cached_tokens": final_response.token_usage.get(
                                             "cached_tokens", 0
                                         ),
-                                        "model": OPENAI_MODEL,
+                                        "model": used_model,
                                     }
                                 )
 
@@ -814,7 +821,7 @@ async def bulk_persist_messages_activity(
     from app.db.models.message import Message
     from app.db.models.session import ChatSession
     from app.account.utils import increment_user_token_usage
-    from app.agents.config import OPENAI_MODEL
+    from app.agents.config import DEFAULT_MODEL
 
     try:
         logger.info(
@@ -831,9 +838,9 @@ async def bulk_persist_messages_activity(
                 logger.error(f"[BULK_PERSIST] Session {chat_id} not found")
                 return {"success": False, "error": "Session not found", "persisted": 0}
 
-            # Update model_used if not set
+            # Update model_used if not set (fallback for backward compatibility)
             if not session.model_used:
-                session.model_used = OPENAI_MODEL
+                session.model_used = DEFAULT_MODEL
                 session.save(update_fields=["model_used"])
 
             # Prepare Message objects for bulk_create

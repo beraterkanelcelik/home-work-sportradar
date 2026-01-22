@@ -90,6 +90,7 @@ class ChatWorkflow:
         flow: str = "main",
         run_id: Optional[str] = None,
         parent_message_id: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> None:
         """
         Signal handler for new messages.
@@ -100,6 +101,7 @@ class ChatWorkflow:
             flow: Flow type
             run_id: Optional correlation ID (ensures stable dedupe identity)
             parent_message_id: Optional parent user message ID for correlation
+            model: Optional model to use (e.g., gpt-4o, gpt-3.5-turbo)
         """
         if self.is_closing:
             workflow.logger.warning("Workflow is closing, ignoring new message signal")
@@ -140,6 +142,7 @@ class ChatWorkflow:
             "flow": flow,
             "run_id": run_id,  # Correlation ID
             "parent_message_id": parent_message_id,  # Parent message ID
+            "model": model,  # Model selected by user in chat UI
             "_hash": message_hash,  # Store stable hash for deduplication
         }
         self.pending_messages.append(signal_data)
@@ -369,6 +372,8 @@ class ChatWorkflow:
                 # Prepare state
                 user_id = self.initial_state.get("user_id")
                 tenant_id = self.initial_state.get("tenant_id") or user_id
+                # Get model from signal data or fall back to initial_state
+                model = signal_data.get("model") or self.initial_state.get("model")
 
                 state = {
                     "user_id": user_id,
@@ -378,6 +383,7 @@ class ChatWorkflow:
                     "flow": signal_data.get("flow", "main"),
                     "run_id": signal_data.get("run_id"),
                     "parent_message_id": signal_data.get("parent_message_id"),
+                    "model": model,  # Model selected by user in chat UI
                     "tenant_id": tenant_id,
                     "org_slug": self.initial_state.get("org_slug"),
                     "org_roles": self.initial_state.get("org_roles", []),

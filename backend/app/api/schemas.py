@@ -8,9 +8,10 @@ from typing import Optional, List, Dict, Any
 
 class StreamAgentRequest(BaseModel):
     """Validated request for agent streaming."""
-    
+
     chat_session_id: int = Field(..., gt=0, description="Chat session ID")
     message: str = Field(..., min_length=1, max_length=100000, description="User message")
+    model: Optional[str] = Field(default=None, max_length=64, description="Model to use (e.g., gpt-4o, gpt-4o-mini)")
     plan_steps: Optional[List[Dict[str, Any]]] = None
     flow: str = Field(default="main", pattern="^(main|plan)$", description="Flow type")
     idempotency_key: Optional[str] = Field(None, max_length=64, description="Idempotency key")

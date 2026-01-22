@@ -357,11 +357,15 @@ async def stategraph_workflow_events(
                 # New request - build initial state
                 from langchain_core.messages import HumanMessage
 
+                # Get model from request (selected by user in chat UI)
+                selected_model = request.get("model", "gpt-4o-mini")
+
                 initial_state = {
                     "messages": [HumanMessage(content=request.get("message", ""))],
                     "user_id": request.get("user_id", 0),
                     "session_id": request.get("session_id", 0),
                     "api_key": request.get("api_key", ""),
+                    "model": selected_model,
                     "tasks": [],
                     "rag_context": "",
                     "player_data": None,

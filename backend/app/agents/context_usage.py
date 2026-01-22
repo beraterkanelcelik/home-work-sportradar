@@ -7,7 +7,7 @@ of the model's context window, and trim messages using LangChain's built-in util
 from typing import Dict, Any, List, Optional
 from langchain_core.messages import BaseMessage, trim_messages, SystemMessage
 from langchain_openai import ChatOpenAI
-from app.agents.config import get_model_context_window, OPENAI_MODEL
+from app.agents.config import get_model_context_window, DEFAULT_MODEL
 from app.rag.chunking.tokenizer import count_tokens
 from app.core.logging import get_logger
 
@@ -23,7 +23,7 @@ def calculate_context_usage(
 
     Args:
         messages: List of conversation messages
-        model_name: Model name (defaults to OPENAI_MODEL)
+        model_name: Model name (defaults to DEFAULT_MODEL)
 
     Returns:
         Dictionary with:
@@ -32,7 +32,7 @@ def calculate_context_usage(
         - usage_percentage: Percentage of context used
         - tokens_remaining: Tokens remaining in context
     """
-    model_name = model_name or OPENAI_MODEL
+    model_name = model_name or DEFAULT_MODEL
 
     try:
         # Get model's context window size
@@ -112,7 +112,7 @@ def get_trimmed_messages(
     
     Args:
         messages: List of conversation messages
-        model_name: Model name (defaults to OPENAI_MODEL)
+        model_name: Model name (defaults to DEFAULT_MODEL)
         max_tokens: Maximum tokens to keep (defaults to 80% of model context window)
         include_system: Whether to include system messages
         strategy: Trimming strategy ("last" keeps most recent, "first" keeps oldest)
@@ -120,7 +120,7 @@ def get_trimmed_messages(
     Returns:
         Trimmed list of messages that fit within the context window
     """
-    model_name = model_name or OPENAI_MODEL
+    model_name = model_name or DEFAULT_MODEL
     
     try:
         # Get model's context window size

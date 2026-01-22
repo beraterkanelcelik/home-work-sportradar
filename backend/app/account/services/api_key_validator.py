@@ -105,7 +105,7 @@ def validate_api_keys_bundle(
         from langfuse.langchain import CallbackHandler
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
-        from app.agents.config import OPENAI_MODEL
+        from app.agents.config import DEFAULT_MODEL
 
         langfuse_client = Langfuse(
             public_key=langfuse_public_key,
@@ -122,7 +122,7 @@ def validate_api_keys_bundle(
 
         callback_handler = CallbackHandler(public_key=langfuse_public_key)
         llm = ChatOpenAI(
-            model=OPENAI_MODEL,
+            model=DEFAULT_MODEL,
             api_key=openai_key,
             temperature=0,
             max_tokens=1,

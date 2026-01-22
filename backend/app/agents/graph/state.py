@@ -53,6 +53,7 @@ class AgentState(TypedDict):
     user_id: int
     session_id: int
     api_key: str
+    model: str  # Selected model from chat UI (e.g., "gpt-4o", "gpt-4o-mini")
 
     # Agent's dynamic task list
     tasks: List[TaskDict]
@@ -196,6 +197,7 @@ def create_initial_state(
     session_id: int,
     api_key: str,
     run_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a validated initial state for the workflow.
@@ -206,6 +208,7 @@ def create_initial_state(
         session_id: Session ID
         api_key: OpenAI API key
         run_id: Optional run ID for tracking
+        model: Optional model name (defaults to "gpt-4o-mini")
 
     Returns:
         Initial state dictionary ready for workflow
@@ -224,11 +227,15 @@ def create_initial_state(
         run_id=run_id,
     )
 
+    # Default model if not specified
+    selected_model = model or "gpt-4o-mini"
+
     return {
         "messages": [HumanMessage(content=validated_input.message)],
         "user_id": validated_input.user_id,
         "session_id": validated_input.session_id,
         "api_key": validated_input.api_key,
+        "model": selected_model,
         "tasks": [],
         "rag_context": "",
         "player_data": None,

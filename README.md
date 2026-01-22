@@ -92,12 +92,14 @@ A scouting agent that demonstrates:
 **Where it lives:**
 - PostgreSQL with pgvector extension
 - Document chunks with embeddings
+- Player scouting reports (persisted via `save_player_report`)
 
 **How it's used:**
 - Agent searches knowledge base via `search_documents` tool
 - RAG context accumulates across plan steps
 - UI shows "Searching knowledge base..." during retrieval
 - Report composition uses all gathered context
+- Saved player reports become part of the searchable knowledge base
 
 ---
 
@@ -233,21 +235,23 @@ See [docs/security_check.md](./docs/security_check.md) for security audit notes.
 
 | Decision | Tradeoff |
 |----------|----------|
+| LangChain + LangGraph over CrewAI | More control over state and flow, but requires manual orchestration |
 | Temporal over simple queues | Added complexity, but gained durability + visibility |
-| LangGraph over raw LangChain | Learning curve, but cleaner state management |
-| Redis pub/sub over WebSocket | Simpler infra, but slightly higher latency |
+| Redis pub/sub over WebSocket | Extremely fast message delivery with simpler scaling |
 | In-memory message buffer | Fast streaming, requires bulk persist on close |
+| PostgreSQL over NoSQL | ACID compliance and pgvector support, relational constraints |
+| Graph API over functional API | Declarative node definitions, cleaner state transitions |
 
 ---
 
 ## Future Improvements
 
 - **Dynamic Sub-Agent Creation:** Spawn specialized agents (stats analyst, injury scout, transfer market) based on query type for faster, more robust scouting
-- **Multi-Sport Support:** Extended schemas for NFL, NHL, MLB
-- **Document Ingestion UI:** Upload scouting PDFs directly
-- **Comparison Mode:** Side-by-side player analysis
-- **Export Functionality:** PDF/CSV report generation
-- **Webhook Integrations:** Notify external systems on report creation
+- **More Agent Capabilities:** Player comparison mode, side-by-side analysis
+- **New Tools:** Web search integration for real-time data gathering
+- **More API Provider Support:** Additional LLM providers, local model support
+- **Enhanced Reranking:** Expanded reranker integration (currently optional via Cohere)
+- **Real-Time Player API:** Live data pipeline connection for up-to-date player statistics
 
 ---
 

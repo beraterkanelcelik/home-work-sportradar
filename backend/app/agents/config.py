@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # OpenAI Configuration
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# Default model - this is used as fallback when no model is specified
+# The actual model used is selected by the user in the chat UI
+DEFAULT_MODEL = "gpt-4o-mini"
+
+# DEPRECATED: Keep for backward compatibility, but model selection should come from chat UI
+OPENAI_MODEL = DEFAULT_MODEL
 
 
 # LangSmith Configuration (optional, kept for compatibility)

@@ -211,9 +211,13 @@ def agent_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     # Get Langfuse metadata for session-level grouping (SDK v3)
     langfuse_metadata = _get_langfuse_metadata(state)
 
+    # Get model from state (selected by user in chat UI)
+    selected_model = state.get("model", "gpt-4o-mini")
+    logger.info(f"[AGENT_NODE] Using model: {selected_model}")
+
     # Create LLM with tools (streaming callbacks for frontend only)
     llm = ChatOpenAI(
-        model="gpt-4o",
+        model=selected_model,
         api_key=state["api_key"],
         temperature=0.3,
         streaming=True,
@@ -418,8 +422,13 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     # Get Langfuse metadata for session-level grouping (SDK v3)
     langfuse_metadata = _get_langfuse_metadata(state)
 
+    # Get model from state (selected by user in chat UI)
+    # For planning, we use the same model the user selected
+    selected_model = state.get("model", "gpt-4o-mini")
+    logger.info(f"[PLANNER_NODE] Using model: {selected_model}")
+
     planner_llm = ChatOpenAI(
-        model="gpt-4o-mini",  # Use faster model for planning
+        model=selected_model,
         api_key=state["api_key"],
         temperature=0,
         callbacks=callbacks,  # Frontend streaming callbacks only
@@ -901,9 +910,13 @@ def compose_report_node(state: AgentState, config: RunnableConfig) -> Dict[str, 
     # Get Langfuse metadata for session-level grouping (SDK v3)
     langfuse_metadata = _get_langfuse_metadata(state)
 
+    # Get model from state (selected by user in chat UI)
+    selected_model = state.get("model", "gpt-4o-mini")
+    logger.info(f"[COMPOSE_REPORT_NODE] Using model: {selected_model}")
+
     # Create LLM for composition
     composer_llm = ChatOpenAI(
-        model="gpt-4o",  # Use full model for quality composition
+        model=selected_model,
         api_key=state["api_key"],
         temperature=0.5,  # Slightly higher for more creative writing
         callbacks=callbacks,  # Frontend streaming callbacks only

@@ -1255,7 +1255,8 @@ export default function ChatPage() {
             // Clear StateGraph state
             setAgentTasks([])
             setActiveToolCall(null)
-          }
+          },
+          selectedModel  // Pass selected model to backend
         )
 
         streamRef.current = stream
@@ -1264,7 +1265,7 @@ export default function ChatPage() {
       toast.error(getErrorMessage(error, 'Failed to send message'))
       setSending(false)
     }
-  }, [currentSession, sending, loadMessages])
+  }, [currentSession, sending, loadMessages, selectedModel])
 
   // Handle initial message from navigation state - only once when session is loaded
   useEffect(() => {

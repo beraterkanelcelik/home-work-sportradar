@@ -163,10 +163,11 @@ async def get_or_create_workflow(
                         # Temporal client operations should work across event loops
                         # Use asyncio.ensure_future to ensure it runs in current loop if needed
                         try:
-                            # Extract correlation IDs from initial_state for stable dedupe
+                            # Extract correlation IDs and model from initial_state for stable dedupe
                             run_id = initial_state.get("run_id") if initial_state else None
                             parent_message_id = initial_state.get("parent_message_id") if initial_state else None
-                            await handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id))
+                            model = initial_state.get("model") if initial_state else None
+                            await handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id, model))
                             logger.info(f"[SIGNAL_SEND] Sent message signal to existing workflow {workflow_id} session={session_id} run_id={run_id} message_preview={message[:50]}...")
                         except RuntimeError as loop_error:
                             error_str = str(loop_error)
@@ -181,7 +182,7 @@ async def get_or_create_workflow(
                                 fresh_handle = fresh_client.get_workflow_handle(workflow_id)
                                 run_id = initial_state.get("run_id") if initial_state else None
                                 parent_message_id = initial_state.get("parent_message_id") if initial_state else None
-                                await fresh_handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id))
+                                await fresh_handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id, model))
                                 logger.info(f"[SIGNAL_SEND] Sent message signal via fresh client to workflow {workflow_id} session={session_id} run_id={run_id} message_preview={message[:50]}...")
                             else:
                                 raise
@@ -223,9 +224,10 @@ async def get_or_create_workflow(
         
         logger.info(f"Creating new workflow {workflow_id} with signal_with_start for session {session_id}")
         try:
-            # Extract correlation IDs from initial_state for stable dedupe
+            # Extract correlation IDs and model from initial_state for stable dedupe
             run_id = initial_state.get("run_id") if initial_state else None
             parent_message_id = initial_state.get("parent_message_id") if initial_state else None
+            model = initial_state.get("model") if initial_state else None
             handle = await client.start_workflow(
                 ChatWorkflow.run,
                 args=(session_id, initial_state or {}),
@@ -237,7 +239,7 @@ async def get_or_create_workflow(
                 # Note: search_attributes removed - would require Temporal namespace configuration
                 # Use memo instead for workflow metadata
                 start_signal="new_message",
-                start_signal_args=(message, plan_steps, flow, run_id, parent_message_id),
+                start_signal_args=(message, plan_steps, flow, run_id, parent_message_id, model),
             )
         except Exception as create_error:
             # Workflow might have been created between our check and start_workflow call
@@ -250,7 +252,8 @@ async def get_or_create_workflow(
                     # Workflow exists, send signal
                     run_id = initial_state.get("run_id") if initial_state else None
                     parent_message_id = initial_state.get("parent_message_id") if initial_state else None
-                    await handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id))
+                    model = initial_state.get("model") if initial_state else None
+                    await handle.signal("new_message", args=(message, plan_steps, flow, run_id, parent_message_id, model))
                     logger.info(f"[SIGNAL_SEND] Sent message signal to existing workflow {workflow_id} session={session_id} run_id={run_id} message_preview={message[:50]}...")
                     return handle
             except Exception as get_error:
@@ -289,37 +292,39 @@ async def send_message_signal(
     session_id: int,
     message: str,
     plan_steps: Optional[list] = None,
-    flow: str = "main"
+    flow: str = "main",
+    model: Optional[str] = None
 ) -> bool:
     """
     Send a message signal to the session workflow.
-    
+
     Args:
         user_id: User ID
         session_id: Chat session ID
         message: Message content
         plan_steps: Optional plan steps
         flow: Flow type
-        
+        model: Optional model to use (e.g., gpt-4o, gpt-3.5-turbo)
+
     Returns:
         True if signal sent successfully, False otherwise
     """
     try:
         client = await get_temporal_client()
         workflow_id = get_workflow_id(user_id, session_id)
-        
+
         # Get workflow handle
         handle = client.get_workflow_handle(workflow_id)
-        
+
         # Send signal using signal name as string with args parameter
         await handle.signal(
             "new_message",
-            args=(message, plan_steps, flow)
+            args=(message, plan_steps, flow, None, None, model)
         )
-        
-        logger.info(f"[SIGNAL_SEND] Sent message signal to workflow {workflow_id} session={session_id} message_preview={message[:50]}... flow={flow}")
+
+        logger.info(f"[SIGNAL_SEND] Sent message signal to workflow {workflow_id} session={session_id} message_preview={message[:50]}... flow={flow} model={model}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error sending message signal to session {session_id}: {e}", exc_info=True)
         # If workflow doesn't exist, create it with signal_with_start
@@ -333,6 +338,7 @@ async def send_message_signal(
                     "message": message,
                     "plan_steps": plan_steps,
                     "flow": flow,
+                    "model": model,
                 }
             )
             return True
