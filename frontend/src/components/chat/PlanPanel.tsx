@@ -73,7 +73,11 @@ export default function PlanPanel({
   isApproved,
   isCompleted,
 }: PlanPanelProps) {
-  if (!plan) return null
+  // Guard: return null if plan or plan.plan is missing
+  if (!plan || !plan.plan || !Array.isArray(plan.plan)) {
+    console.warn('[PlanPanel] Missing or invalid plan data:', { plan, hasPlan: !!plan, hasPlanArray: !!plan?.plan, isArray: Array.isArray(plan?.plan) })
+    return null
+  }
 
   const getStepStatus = (step: PlanStep, index: number): 'pending' | 'in_progress' | 'completed' | 'error' => {
     // If plan is completed, all steps are completed

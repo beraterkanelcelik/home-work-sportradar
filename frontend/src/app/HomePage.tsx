@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { getErrorMessage } from '@/lib/utils'
 import { documentAPI } from '@/lib/api'
-import logoWithText from '@/assets/logowithtextblacktransparent.png'
+import poweredBySportradar from '@/assets/powered-by-sportradar-1000w.png'
 
 export default function HomePage() {
   const { isAuthenticated } = useAuthStore()
@@ -99,15 +99,16 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh]">
-      <div className="flex flex-col items-center -mb-16 sm:-mb-24 md:-mb-32">
-        <img 
-          src={logoWithText} 
-          alt="Agent Playground" 
-          className="h-48 sm:h-64 md:h-96 w-auto object-contain"
+      <div className="flex flex-col items-center mb-8 sm:mb-10">
+        <h1 className="brand-title brand-title-xl text-primary mb-3">Scout Agent</h1>
+        <img
+          src={poweredBySportradar}
+          alt="by Sportradar"
+          className="h-5 sm:h-6 w-auto object-contain"
         />
       </div>
-      <p className="text-muted-foreground mb-4 sm:mb-6 text-center text-xs sm:text-sm px-4">
-        Chat with AI agents powered by LangChain and LangGraph
+      <p className="text-muted-foreground mb-6 sm:mb-8 text-center text-sm sm:text-base px-4 max-w-lg">
+        AI-powered sports scouting assistant for comprehensive player analysis
       </p>
       
       {isAuthenticated ? (
@@ -223,7 +224,7 @@ export default function HomePage() {
                   {/* Send Button */}
                   <button
                     type="submit"
-                    onClick={handleSubmit}
+                    onClick={() => handleSubmit()}
                     disabled={sending || (!input.trim() && attachedFiles.length === 0)}
                     className="p-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     aria-label="Send message"

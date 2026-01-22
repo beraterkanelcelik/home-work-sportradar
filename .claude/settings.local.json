@@ -14,7 +14,15 @@
       "Bash(docker exec django-backend bash -c \"env | grep LANGFUSE\")",
       "Bash(docker exec:*)",
       "Bash(python manage.py check:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git checkout:*)",
+      "Bash(ls:*)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\berat\\\\Documents\\\\home-work-sportradar\\\\backend\\\\app\\\\agents\\\\functional\")",
+      "Bash(dir:*)",
+      "WebFetch(domain:langfuse.com)",
+      "WebFetch(domain:python.reference.langfuse.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:sportradar.com)"
     ]
   }
 }

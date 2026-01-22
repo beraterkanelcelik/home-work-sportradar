@@ -15,13 +15,17 @@ export interface PlanProposalData {
   type: string
   plan: Array<{
     action: string
-    tool: string
-    props: Record<string, any>
+    tool?: string
+    answer?: string
+    props?: Record<string, any>
     agent: string
     query: string
+    status?: 'pending' | 'in_progress' | 'completed' | 'error'
   }>
   plan_index: number
   plan_total: number
+  player_name?: string
+  sport_guess?: string
 }
 
 interface UsePlanApprovalProps {

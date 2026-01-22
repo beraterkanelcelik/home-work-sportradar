@@ -7,6 +7,7 @@
  */
 
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import JsonViewer from '@/components/JsonViewer'
 
@@ -61,6 +62,7 @@ export default function PlayerPreview({
   isCompleted = false,
   completedAction,
 }: PlayerPreviewProps) {
+  const navigate = useNavigate()
   const [showFullReport, setShowFullReport] = useState(false)
   const [feedback, setFeedback] = useState('')
 
@@ -79,8 +81,24 @@ export default function PlayerPreview({
 
   // Collapsed view for completed (approved/rejected) player previews
   if (isCompleted) {
+    const handleViewReport = () => {
+      if (completedAction === 'approved') {
+        navigate('/scout-reports')
+      }
+    }
+
     return (
-      <div className={`border rounded-lg p-3 ${completedAction === 'approved' ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'}`}>
+      <div
+        className={`border rounded-lg p-3 ${completedAction === 'approved' ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800 cursor-pointer hover:border-green-400 dark:hover:border-green-600 transition-colors' : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800'}`}
+        onClick={handleViewReport}
+        role={completedAction === 'approved' ? 'button' : undefined}
+        tabIndex={completedAction === 'approved' ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (completedAction === 'approved' && (e.key === 'Enter' || e.key === ' ')) {
+            handleViewReport()
+          }
+        }}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-medium ${player.sport === 'nba' ? 'bg-blue-600' : player.sport === 'football' ? 'bg-green-600' : 'bg-gray-600'}`}>
@@ -101,7 +119,10 @@ export default function PlayerPreview({
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                Player Saved
+                <span>Player Saved</span>
+                <svg className="w-4 h-4 ml-1 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
               </>
             ) : (
               <>
@@ -113,6 +134,11 @@ export default function PlayerPreview({
             )}
           </div>
         </div>
+        {completedAction === 'approved' && (
+          <div className="text-xs text-green-600 dark:text-green-400 mt-2 text-right">
+            Click to view in Scout Reports
+          </div>
+        )}
       </div>
     )
   }

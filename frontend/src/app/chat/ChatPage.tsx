@@ -36,7 +36,7 @@ import { useChatStore, type Message } from '@/state/useChatStore'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
-import { createAgentStream, createResumeStream, StreamEvent, SSEResumeStream } from '@/lib/streaming'
+import { createAgentStream, createResumeStream, StreamEvent, SSEResumeStream, AgentTask } from '@/lib/streaming'
 import { chatAPI, agentAPI, documentAPI, modelsAPI } from '@/lib/api'
 import { getErrorMessage } from '@/lib/utils'
 import { generateTempMessageId, generateTempStatusMessageId } from '@/constants/messages'
@@ -99,7 +99,11 @@ export default function ChatPage() {
   const [streamComplete, setStreamComplete] = useState<Set<number>>(new Set()) // Track which messages have completed streaming
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
   const [executingPlanMessageId, setExecutingPlanMessageId] = useState<number | null>(null)
-  
+
+  // Agent tasks state (from StateGraph workflow)
+  const [agentTasks, setAgentTasks] = useState<AgentTask[]>([])
+  const [activeToolCall, setActiveToolCall] = useState<{ tool: string; description: string } | null>(null)
+
   // Plan panel state
   const [planPanelCollapsed, setPlanPanelCollapsed] = useState(false)
   const [showPlanPanel, setShowPlanPanel] = useState(true)
@@ -195,6 +199,7 @@ export default function ChatPage() {
   }, [sessionId, loadSession, loadMessages, clearCurrentSession, currentSession])
   
   // Mark all loaded messages from database as stream complete (they're already finished)
+  // Also initialize approvedPlanMessageIds from messages with plan_approved: true
   // Only run when session changes to avoid unnecessary updates
   useEffect(() => {
     if (currentSession && messages.length > 0) {
@@ -205,6 +210,36 @@ export default function ChatPage() {
           // Temporary messages (negative IDs) are still streaming
           if (msg.role === 'assistant' && msg.id > 0 && msg.id < 1000000000000) {
             newSet.add(msg.id)
+          }
+        })
+        return newSet
+      })
+
+      // Initialize approvedPlanMessageIds from messages that were approved
+      // This ensures approval state persists across page refreshes
+      setApprovedPlanMessageIds(prev => {
+        const newSet = new Set(prev)
+        messages.forEach(msg => {
+          if (msg.plan_approved === true && msg.id > 0) {
+            newSet.add(msg.id)
+          }
+        })
+        return newSet
+      })
+
+      // Initialize completedPlanMessageIds from messages with completed plans
+      // A plan is considered completed if it has plan_progress with all steps completed
+      setCompletedPlanMessageIds(prev => {
+        const newSet = new Set(prev)
+        messages.forEach(msg => {
+          if (msg.plan && msg.plan_progress && msg.id > 0) {
+            const totalSteps = msg.plan_progress.total_steps || msg.plan.plan_total || 0
+            const completedSteps = Object.values(msg.plan_progress.steps_status || {}).filter(
+              (s: any) => s.status === 'completed'
+            ).length
+            if (totalSteps > 0 && completedSteps >= totalSteps) {
+              newSet.add(msg.id)
+            }
           }
         })
         return newSet
@@ -501,29 +536,24 @@ export default function ChatPage() {
               }
 
               // Handle task status updates - create/update system status messages in real-time
-              // BUT: Stop updating status messages once answer tokens start arriving
+              // Allow completion updates (is_completed=true) even after tokens start
+              // Only block NEW status messages after tokens start
               if (updateData.task && updateData.status) {
                 set((state: { messages: Message[] }) => {
                   // Check if assistant message already has content (tokens have started arriving)
                   const assistantMsg = state.messages.find((msg: Message) => msg.id === assistantMessageId)
                   const hasAnswerTokens = assistantMsg?.content && assistantMsg.content.trim().length > 0
-                  
-                  // If answer tokens have started, don't update status messages anymore
-                  // They should remain frozen at their last state
-                  if (hasAnswerTokens) {
-                    return state
-                  }
-                  
-                  // Check if status message already exists for this task (check both temp and DB messages)
+
+                  // Check if status message already exists for this task
                   const existingStatusMsg = state.messages.find(
-                    (msg: Message) => 
-                      msg.role === 'system' && 
+                    (msg: Message) =>
+                      msg.role === 'system' &&
                       msg.metadata?.status_type === 'task_status' &&
                       msg.metadata?.task === updateData.task
                   )
-                  
+
                   if (existingStatusMsg) {
-                    // Update existing status message (present -> past tense)
+                    // Always allow updating existing status messages (for completion updates)
                     return {
                       messages: state.messages.map((msg: Message) =>
                         msg.id === existingStatusMsg.id
@@ -539,6 +569,11 @@ export default function ChatPage() {
                       ),
                     }
                   } else {
+                    // Only create new status messages before tokens start arriving
+                    if (hasAnswerTokens) {
+                      return state
+                    }
+
                     // Create new status message with unique temporary ID
                     // Use negative ID to avoid conflicts with database IDs
                     const tempId = generateTempStatusMessageId()
@@ -554,7 +589,7 @@ export default function ChatPage() {
                         is_completed: updateData.is_completed === true || false
                       }
                     }
-                    
+
                     // Insert before the assistant message
                     const assistantIndex = state.messages.findIndex((msg: Message) => msg.id === assistantMessageId)
                     if (assistantIndex >= 0) {
@@ -627,17 +662,13 @@ export default function ChatPage() {
                   // Skip pre-plan progress (total_steps=0 means plan hasn't been generated yet)
                   if (updateData.total_steps > 0) {
                     // Update the plan with step progress
-                    if (!updates.plan_progress) {
-                      updates.plan_progress = {}
-                    }
                     updates.plan_progress = {
-                      ...updates.plan_progress,
                       current_step_index: updateData.step_index,
                       total_steps: updateData.total_steps,
                       steps_status: {
                         ...(updates.plan_progress?.steps_status || {}),
                         [updateData.step_index]: {
-                          status: updateData.status,
+                          status: updateData.status as 'pending' | 'in_progress' | 'completed' | 'error',
                           step_name: updateData.step_name,
                           result: updateData.result,
                         }
@@ -1069,17 +1100,29 @@ export default function ChatPage() {
                     ),
                   }
                 })
-              } else if (interruptValue && interruptValue.type === 'player_approval') {
-                // Player approval interrupt - HITL Gate B for scouting workflow
-                // Backend sends: { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
-                
+              } else if (interruptValue && (interruptValue.type === 'player_approval' || interruptValue.type === 'save_player')) {
+                // Player/Save approval interrupt - HITL for saving player reports
+                // Old format (player_approval): { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
+                // New format (save_player): { type: "save_player", session_id, player_name, report_summary, player_data }
+
                 // Convert backend format to frontend expected format
-                const playerPreview = {
-                  player: interruptValue.player_fields,
-                  report_summary: interruptValue.report_summary,
-                  report_text: interruptValue.report_text,
-                  session_id: interruptValue.session_id
-                }
+                const playerPreview = interruptValue.type === 'save_player'
+                  ? {
+                      // StateGraph format
+                      player: interruptValue.player_data || { display_name: interruptValue.player_name },
+                      report_summary: typeof interruptValue.report_summary === 'string'
+                        ? [interruptValue.report_summary]
+                        : interruptValue.report_summary || [],
+                      report_text: interruptValue.report_summary || '',
+                      session_id: interruptValue.session_id
+                    }
+                  : {
+                      // Legacy functional API format
+                      player: interruptValue.player_fields,
+                      report_summary: interruptValue.report_summary,
+                      report_text: interruptValue.report_text,
+                      session_id: interruptValue.session_id
+                    }
 
                 console.log(`[PLAYER_HITL] [INTERRUPT] Received player approval interrupt: session=${currentSession?.id} player=${playerPreview?.player?.display_name}`, playerPreview)
 
@@ -1160,6 +1203,25 @@ export default function ChatPage() {
             } else if (eventType === 'agent_start') {
               const agentData = event.data || {}
               console.log(`[FRONTEND] [STREAM] Agent started: agent=${agentData.agent_name || 'unknown'} session=${currentSession.id}`)
+            } else if (eventType === 'tasks_updated') {
+              // StateGraph: Agent's task list update
+              const tasksData = event.data || {}
+              const tasks = tasksData.tasks || []
+              console.log(`[FRONTEND] [TASKS] Agent tasks updated: count=${tasks.length} session=${currentSession.id}`)
+              setAgentTasks(tasks)
+            } else if (eventType === 'tool_start') {
+              // StateGraph: Tool execution started
+              const toolData = event.data || {}
+              console.log(`[FRONTEND] [TOOL_START] Tool execution started: tool=${toolData.tool} session=${currentSession.id}`)
+              setActiveToolCall({
+                tool: toolData.tool,
+                description: toolData.description || `Running ${toolData.tool}...`
+              })
+            } else if (eventType === 'tool_complete') {
+              // StateGraph: Tool execution completed
+              const toolData = event.data || {}
+              console.log(`[FRONTEND] [TOOL_COMPLETE] Tool execution completed: tool=${toolData.tool} success=${toolData.success} session=${currentSession.id}`)
+              setActiveToolCall(null)
             } else {
               // Handle unknown event types gracefully
               console.debug(`[FRONTEND] Unknown event type received session=${currentSession.id} type=${eventType}`, event)
@@ -1189,6 +1251,9 @@ export default function ChatPage() {
             setWaitingForResponse(false)
             setWaitingMessageId(null)
             setExecutingPlanMessageId(null)
+            // Clear StateGraph state
+            setAgentTasks([])
+            setActiveToolCall(null)
           }
         )
 
@@ -1482,7 +1547,7 @@ export default function ChatPage() {
     // Track the temp ID of any final message we create (for updating with DB ID later)
     let finalMessageTempId: number | null = null
     // Accumulate all completed steps for persistence (backend needs full state, not just current step)
-    const accumulatedStepsStatus: Record<number, { status: string; step_name: string; result?: string }> = {}
+    const accumulatedStepsStatus: Record<number, { status: 'pending' | 'in_progress' | 'completed' | 'error'; step_name: string; result?: string }> = {}
 
     const resumeStream = createResumeStream(
       currentSession.id,
@@ -1536,7 +1601,7 @@ export default function ChatPage() {
           // Accumulate step status for persistence
           if (progressData.status === 'completed' || progressData.status === 'error') {
             accumulatedStepsStatus[progressData.step_index] = {
-              status: progressData.status,
+              status: progressData.status as 'completed' | 'error',
               step_name: progressData.step_name,
               result: progressData.result,
             }
@@ -1584,6 +1649,25 @@ export default function ChatPage() {
                 : msg
             ),
           }))
+        } else if (eventType === 'tasks_updated') {
+          // StateGraph: Agent's task list update
+          const tasksData = event.data || {}
+          const tasks = tasksData.tasks || []
+          console.log(`[RESUME_STREAM] [TASKS] Agent tasks updated: count=${tasks.length}`)
+          setAgentTasks(tasks)
+        } else if (eventType === 'tool_start') {
+          // StateGraph: Tool execution started
+          const toolData = event.data || {}
+          console.log(`[RESUME_STREAM] [TOOL_START] Tool execution started: tool=${toolData.tool}`)
+          setActiveToolCall({
+            tool: toolData.tool,
+            description: toolData.description || `Running ${toolData.tool}...`
+          })
+        } else if (eventType === 'tool_complete') {
+          // StateGraph: Tool execution completed
+          const toolData = event.data || {}
+          console.log(`[RESUME_STREAM] [TOOL_COMPLETE] Tool execution completed: tool=${toolData.tool} success=${toolData.success}`)
+          setActiveToolCall(null)
         } else if (eventType === 'message_saved') {
           // Update message with real DB id
           const savedData = event.data || {}
@@ -1604,20 +1688,32 @@ export default function ChatPage() {
           const interruptValue = interruptData.value || interruptData
           console.log(`[RESUME_STREAM] [INTERRUPT] Another interrupt received: type=${interruptValue?.type}`, interruptValue)
           
-          if (interruptValue && interruptValue.type === 'player_approval') {
-            // Player approval interrupt - HITL Gate B for scouting workflow
-            // Backend sends: { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
-            
+          if (interruptValue && (interruptValue.type === 'player_approval' || interruptValue.type === 'save_player')) {
+            // Player/Save approval interrupt - HITL for saving player reports
+            // Old format (player_approval): { type: "player_approval", session_id, player_fields: {...}, report_summary: [...], report_text: "..." }
+            // New format (save_player): { type: "save_player", session_id, player_name, report_summary, player_data }
+
             // Mark that we received player approval - this prevents loadMessages() from clearing the preview
             receivedPlayerApproval = true
-            
+
             // Convert backend format to frontend expected format
-            const playerPreview = {
-              player: interruptValue.player_fields,
-              report_summary: interruptValue.report_summary,
-              report_text: interruptValue.report_text,
-              session_id: interruptValue.session_id
-            }
+            const playerPreview = interruptValue.type === 'save_player'
+              ? {
+                  // StateGraph format
+                  player: interruptValue.player_data || { display_name: interruptValue.player_name },
+                  report_summary: typeof interruptValue.report_summary === 'string'
+                    ? [interruptValue.report_summary]
+                    : interruptValue.report_summary || [],
+                  report_text: interruptValue.report_summary || '',
+                  session_id: interruptValue.session_id
+                }
+              : {
+                  // Legacy functional API format
+                  player: interruptValue.player_fields,
+                  report_summary: interruptValue.report_summary,
+                  report_text: interruptValue.report_text,
+                  session_id: interruptValue.session_id
+                }
 
             console.log(`[RESUME_STREAM] [PLAYER_HITL] Received player approval interrupt: session=${currentSession?.id} player=${playerPreview?.player?.display_name}`, playerPreview)
 
@@ -1774,6 +1870,10 @@ export default function ChatPage() {
         }
         // If we received player approval, DON'T clear executingPlanMessageId
         // The player card needs this to show in the UI, and we're waiting for user approval/rejection
+
+        // Clear StateGraph state
+        setAgentTasks([])
+        setActiveToolCall(null)
       }
     )
 

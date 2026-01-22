@@ -4,7 +4,7 @@
  * Displays all saved scouting reports with filtering, search, and detail view.
  */
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/state/useAuthStore'
 import { Button } from '@/components/ui/button'
@@ -67,16 +67,12 @@ export default function ScoutReportsPage() {
   const [deleteAllDialogOpen, setDeleteAllDialogOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
-  useEffect(() => {
-    loadReports()
-  }, [])
-
-  const loadReports = async () => {
+  const loadReports = useCallback(async () => {
     if (!user) return
-    
+
     setLoading(true)
     setError(null)
-    
+
     try {
       const response = await agentAPI.listScoutReports()
       setReports(response.data.reports || [])
@@ -86,7 +82,11 @@ export default function ScoutReportsPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [user])
+
+  useEffect(() => {
+    loadReports()
+  }, [loadReports])
 
   const handleDeleteReport = async (report: ScoutingReport) => {
     setDeleting(true)

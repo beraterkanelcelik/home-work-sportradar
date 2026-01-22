@@ -15,7 +15,7 @@ export interface PlayerPreviewData {
   player: Record<string, any>
   report_summary: string[]
   report_text: string
-  db_payload_preview: Record<string, any>
+  db_payload_preview?: Record<string, any>
 }
 
 interface UsePlayerApprovalProps {

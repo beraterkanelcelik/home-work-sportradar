@@ -260,12 +260,12 @@ export default function ServiceStatus() {
             className="fixed inset-0 z-10"
             onClick={() => setDropdownOpen(false)}
           />
-          <div className="absolute top-full right-0 sm:right-0 left-0 sm:left-auto mt-1 w-[calc(100vw-2rem)] sm:w-72 max-w-[calc(100vw-2rem)] sm:max-w-none bg-background border rounded-lg shadow-lg p-2 z-20">
+          <div className="absolute top-full right-0 sm:right-0 left-0 sm:left-auto mt-1 w-[calc(100vw-2rem)] sm:w-72 max-w-[calc(100vw-2rem)] sm:max-w-none bg-white dark:bg-gray-900 border rounded-lg shadow-lg p-2 z-20 text-gray-900 dark:text-gray-100">
             <div className="flex items-center justify-between mb-2 px-2 py-1">
-              <span className="text-sm font-semibold">Service Status</span>
+              <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">Service Status</span>
               <button
                 onClick={handleRefresh}
-                className="p-1 hover:bg-muted rounded-md transition-colors"
+                className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"
                 title="Refresh status"
               >
                 <RefreshCw 
@@ -278,7 +278,7 @@ export default function ServiceStatus() {
             </div>
             
             {serviceEntries.length === 0 ? (
-              <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+              <div className="px-2 py-3 text-sm text-gray-500 dark:text-gray-400 text-center">
                 No service data available
               </div>
             ) : (
@@ -286,14 +286,14 @@ export default function ServiceStatus() {
                 {serviceEntries.map(([serviceName, serviceHealth]) => (
                   <div
                     key={serviceName}
-                    className="flex items-start gap-2 px-2 py-2 hover:bg-muted rounded-md transition-colors"
+                    className="flex items-start gap-2 px-2 py-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"
                   >
                     <div className="mt-0.5 flex-shrink-0">
                       {getServiceStatusIcon(serviceHealth.status)}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">
+                        <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
                           {formatServiceName(serviceName)}
                         </span>
                         <span className={cn(
@@ -303,7 +303,7 @@ export default function ServiceStatus() {
                           {serviceHealth.status}
                         </span>
                       </div>
-                      <p className="text-xs text-muted-foreground mt-0.5">
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                         {serviceHealth.message}
                       </p>
                     </div>
@@ -313,8 +313,8 @@ export default function ServiceStatus() {
             )}
 
             {healthStatus.lastChecked && (
-              <div className="mt-2 pt-2 border-t border-border">
-                <p className="text-xs text-muted-foreground px-2">
+              <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-2">
                   Last checked: {healthStatus.lastChecked.toLocaleTimeString()}
                 </p>
               </div>

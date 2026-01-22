@@ -56,13 +56,15 @@ export interface Message {
       result?: string
     }>
   }
+  /** Whether the plan has been approved by the user (persisted in backend) */
+  plan_approved?: boolean
   clarification?: string
   raw_tool_outputs?: Array<Record<string, any>>
   player_preview?: {
     player: Record<string, any>
     report_summary: string[]
     report_text: string
-    db_payload_preview: Record<string, any>
+    db_payload_preview?: Record<string, any>
   }
   /** Player preview approval status - set after user approves/rejects */
   player_preview_status?: 'approved' | 'rejected'
@@ -176,6 +178,7 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
           response_type: metadata.response_type,
           plan: metadata.plan,
           plan_progress: metadata.plan_progress,
+          plan_approved: metadata.plan_approved,  // Persisted plan approval status
           player_preview: metadata.player_preview,
           player_preview_status: metadata.player_preview_status,
           clarification: metadata.clarification,
@@ -204,27 +207,32 @@ export const useChatStore = create<ChatState>((set: (partial: ChatState | Partia
         // Preserve temporary status messages (negative IDs) that are currently in state
         // These are ephemeral UI updates that should persist within the session
         const existingStatusMessages = state.messages.filter(
-          (msg: Message) => 
-            msg.id < 0 && 
-            msg.role === 'system' && 
+          (msg: Message) =>
+            msg.id < 0 &&
+            msg.role === 'system' &&
             msg.metadata?.status_type === 'task_status'
         )
-        
+
         // Merge: DB messages + preserved status messages
-        // Status messages should be inserted at their original relative positions
-        // For simplicity, we'll append them before the last assistant message
+        // Insert status messages RIGHT AFTER the last user message (stable position)
+        // This keeps them between user message and assistant response
         if (existingStatusMessages.length > 0 && uniqueMessages.length > 0) {
-          // Find the last assistant message index in the new messages
-          const lastAssistantIdx = uniqueMessages.map((m, i) => ({ m, i }))
-            .filter(({ m }) => m.role === 'assistant')
-            .pop()?.i ?? uniqueMessages.length
-          
-          // Insert status messages before the last assistant message
+          // Find the last user message index in the new messages
+          const lastUserIdx = uniqueMessages.map((m, i) => ({ m, i }))
+            .filter(({ m }) => m.role === 'user')
+            .pop()?.i ?? -1
+
+          // Insert status messages right after the last user message
           const result = [...uniqueMessages]
-          result.splice(lastAssistantIdx, 0, ...existingStatusMessages)
+          if (lastUserIdx >= 0) {
+            result.splice(lastUserIdx + 1, 0, ...existingStatusMessages)
+          } else {
+            // No user message found, just prepend
+            result.unshift(...existingStatusMessages)
+          }
           return { messages: result }
         }
-        
+
         return { messages: uniqueMessages }
       })
     } catch (error: unknown) {

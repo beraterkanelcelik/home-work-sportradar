@@ -172,5 +172,15 @@ declare module 'lucide-react' {
   export const RefreshCw: ComponentType<IconProps>
   export const AlertCircle: ComponentType<IconProps>
   export const ChevronDown: ComponentType<IconProps>
-  // Add other icons as needed
+  export const ChevronRight: ComponentType<IconProps>
+  export const ChevronLeft: ComponentType<IconProps>
+  export const Check: ComponentType<IconProps>
+  export const Circle: ComponentType<IconProps>
+  export const Search: ComponentType<IconProps>
+  export const Filter: ComponentType<IconProps>
+  export const X: ComponentType<IconProps>
+  export const Download: ComponentType<IconProps>
+  export const Trash2: ComponentType<IconProps>
+  export const Shield: ComponentType<IconProps>
+  export const AlertTriangle: ComponentType<IconProps>
 }
