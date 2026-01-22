@@ -115,6 +115,35 @@ class SavePlayerReportOutput(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
+class ListReportsInput(BaseModel):
+    """Input schema for list_reports tool."""
+
+    player_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional player name to filter by (partial match)"
+    )
+
+    @field_validator('player_name')
+    @classmethod
+    def clean_player_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            return v if v else None
+        return None
+
+
+class ListReportsOutput(BaseModel):
+    """Output schema for list_reports tool."""
+
+    players: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of saved players with their basic info"
+    )
+    count: int = Field(default=0, ge=0, description="Number of players found")
+    message: str = Field(..., description="Summary message")
+
+
 # =============================================================================
 # Player Data Models
 # =============================================================================

@@ -22,7 +22,8 @@
       "WebFetch(domain:langfuse.com)",
       "WebFetch(domain:python.reference.langfuse.com)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:sportradar.com)"
+      "WebFetch(domain:sportradar.com)",
+      "Bash(findstr:*)"
     ]
   }
 }

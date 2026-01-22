@@ -466,6 +466,30 @@ def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
                 "sport_guess": sport_guess,
             }
 
+        # Check if player already exists in database before generating plan
+        if player_name:
+            from .tools import execute_list_reports
+            logger.info(f"[PLANNER_NODE] Checking existing reports for player={player_name}")
+            with langfuse_span(config, "tool:list_reports", metadata={"player_name": player_name, "source": "planner_node"}) as span:
+                existing_reports = execute_list_reports(
+                    player_name=player_name,
+                    user_id=state["user_id"],
+                )
+                _update_span_output(config, span, str(existing_reports)[:500])
+            # If we found existing reports (not "No existing reports found")
+            if "Found" in existing_reports and "existing report" in existing_reports:
+                logger.info(f"[PLANNER_NODE] Found existing report for {player_name}, skipping plan")
+                emit_status(config, "planner", "Found existing report", is_completed=True)
+                # Return to agent with info about existing player - let agent inform user
+                return {
+                    "plan": None,
+                    "plan_approved": True,
+                    "player_name": player_name,
+                    "sport_guess": sport_guess,
+                    "existing_player_info": existing_reports,
+                    "messages": [AIMessage(content=f"I found that you already have a scouting report for this player.\n\n{existing_reports}\n\nWould you like me to create a new report anyway, or would you prefer to view the existing one?")],
+                }
+
         # Format plan for frontend - add required fields
         formatted_plan = []
         for i, step in enumerate(raw_plan):
@@ -712,6 +736,15 @@ def tool_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
                     _update_span_output(config, span, str(result)[:500])
                 # Accumulate RAG context
                 rag_context += f"\n\n### Search: {query}\n{result}"
+            elif tool_name == "list_reports":
+                # list_reports needs user_id for multi-tenant filtering
+                player_name = tool_args.get("player_name")
+                with langfuse_span(config, f"tool:list_reports", metadata={"player_name": player_name}) as span:
+                    result = executor(
+                        player_name=player_name,
+                        user_id=state["user_id"],
+                    )
+                    _update_span_output(config, span, str(result)[:500])
             else:
                 # Wrap other tool executions in Langfuse span
                 with langfuse_span(config, f"tool:{tool_name}", metadata={"args": tool_args}) as span:

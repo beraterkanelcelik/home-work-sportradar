@@ -28,6 +28,8 @@ from .models import (
     SearchDocumentsOutput,
     SavePlayerReportInput,
     SavePlayerReportOutput,
+    ListReportsInput,
+    ListReportsOutput,
     PlayerData,
 )
 
@@ -87,8 +89,36 @@ def save_player_report(player_name: str, report_summary: str) -> str:
     )
 
 
+@tool
+def list_reports(player_name: str = None) -> str:
+    """
+    List existing scouting reports from the database.
+
+    Use this tool to check if a player already has a scouting report before
+    creating a new one. This helps avoid duplicate reports.
+
+    WHEN TO USE:
+    - Before starting a scouting plan, check if the player already exists
+    - When user asks about previously scouted players
+    - To help user find existing reports
+
+    Args:
+        player_name: Optional player name to filter by (partial match).
+                     If not provided, returns recent reports.
+
+    Returns:
+        List of existing players with their names, sport, and report dates.
+        If a matching player exists, you can inform the user instead of
+        creating a duplicate report.
+    """
+    # Schema-only: actual execution in TOOL_EXECUTORS
+    raise NotImplementedError(
+        "list_reports is schema-only. Execution happens via TOOL_EXECUTORS in tool_node."
+    )
+
+
 # Export tools for binding to LLM
-TOOLS = [search_documents, save_player_report]
+TOOLS = [search_documents, save_player_report, list_reports]
 
 
 # =============================================================================
@@ -265,6 +295,96 @@ def execute_save_player_report(
         ).model_dump()
 
 
+def execute_list_reports(player_name: str = None, user_id: int = None) -> str:
+    """
+    List existing scouting reports from the database.
+
+    Args:
+        player_name: Optional player name filter (partial match)
+        user_id: User ID for multi-tenant filtering
+
+    Returns:
+        Formatted string with list of existing players and reports
+    """
+    from app.db.models.player import Player
+
+    logger.info(f"[TOOL] list_reports: player_name={player_name} user_id={user_id}")
+
+    try:
+        # Validate input
+        try:
+            validated_input = ListReportsInput(player_name=player_name)
+            player_name = validated_input.player_name
+        except ValidationError as e:
+            logger.warning(f"[TOOL] list_reports validation error: {e}")
+            return f"Invalid input: {e.errors()[0]['msg']}"
+
+        # Query players for this user
+        queryset = Player.objects.filter(owner_id=user_id).order_by('-created_at')
+
+        # Apply name filter if provided
+        if player_name:
+            queryset = queryset.filter(display_name__icontains=player_name)
+
+        # Limit results
+        players = queryset[:10]
+
+        if not players:
+            if player_name:
+                output = ListReportsOutput(
+                    players=[],
+                    count=0,
+                    message=f"No existing reports found for player matching '{player_name}'. You can create a new scouting report."
+                )
+            else:
+                output = ListReportsOutput(
+                    players=[],
+                    count=0,
+                    message="No scouting reports found. You can create a new one."
+                )
+            return output.message
+
+        # Format player list
+        player_list = []
+        for p in players:
+            player_info = {
+                "id": str(p.id),
+                "name": p.display_name,
+                "sport": p.sport,
+                "positions": p.positions or [],
+                "teams": p.teams or [],
+                "created_at": p.created_at.strftime("%Y-%m-%d") if p.created_at else None,
+            }
+            player_list.append(player_info)
+
+        # Build response message
+        if player_name:
+            message = f"Found {len(player_list)} existing report(s) matching '{player_name}':\n\n"
+        else:
+            message = f"Found {len(player_list)} recent scouting report(s):\n\n"
+
+        for p in player_list:
+            positions_str = ", ".join(p["positions"]) if p["positions"] else "Unknown"
+            teams_str = ", ".join(p["teams"]) if p["teams"] else "Unknown"
+            message += f"• **{p['name']}** ({p['sport']}) - {positions_str} - {teams_str} (saved: {p['created_at']})\n"
+
+        if player_name:
+            message += f"\nA report for this player already exists. Ask the user if they want to create a new report anyway or view the existing one."
+
+        output = ListReportsOutput(
+            players=player_list,
+            count=len(player_list),
+            message=message
+        )
+
+        logger.info(f"[TOOL] list_reports: found {len(player_list)} players")
+        return output.message
+
+    except Exception as e:
+        logger.error(f"[TOOL] list_reports error: {e}", exc_info=True)
+        return f"Error listing reports: {str(e)}"
+
+
 # =============================================================================
 # Tool Executor Registry
 # =============================================================================
@@ -272,4 +392,5 @@ def execute_save_player_report(
 TOOL_EXECUTORS = {
     "search_documents": execute_search_documents,
     "save_player_report": execute_save_player_report,
+    "list_reports": execute_list_reports,
 }
