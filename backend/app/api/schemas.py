@@ -12,6 +12,7 @@ class StreamAgentRequest(BaseModel):
     chat_session_id: int = Field(..., gt=0, description="Chat session ID")
     message: str = Field(..., min_length=1, max_length=100000, description="User message")
     model: Optional[str] = Field(default=None, max_length=64, description="Model to use (e.g., gpt-4o, gpt-4o-mini)")
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=16384, description="Maximum tokens in response (for benchmarking)")
     plan_steps: Optional[List[Dict[str, Any]]] = None
     flow: str = Field(default="main", pattern="^(main|plan)$", description="Flow type")
     idempotency_key: Optional[str] = Field(None, max_length=64, description="Idempotency key")

@@ -225,6 +225,7 @@ RAG_TOKENIZER_MODEL = os.getenv('RAG_TOKENIZER_MODEL', 'gpt-4o-mini')  # Model f
 # Redis Configuration
 REDIS_URL = os.getenv('REDIS_URL', 'redis://redis:6379')
 REDIS_PASSWORD = os.getenv('REDIS_AUTH', 'myredissecret')
+REDIS_MAX_CONNECTIONS = int(os.getenv('REDIS_MAX_CONNECTIONS', '50'))  # Max connections per pool (multiplied by worker count)
 
 # Temporal Configuration
 TEMPORAL_ADDRESS = os.getenv('TEMPORAL_ADDRESS', 'temporal:7233')

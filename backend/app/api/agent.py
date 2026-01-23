@@ -133,6 +133,7 @@ async def stream_agent(request):
         chat_session_id = validated_request.chat_session_id
         message = validated_request.message
         model = validated_request.model
+        max_tokens = validated_request.max_tokens
         plan_steps = validated_request.plan_steps
         flow = validated_request.flow
         idempotency_key = validated_request.idempotency_key or str(uuid.uuid4())
@@ -265,6 +266,7 @@ async def stream_agent(request):
                                 "session_id": chat_session_id,
                                 "message": message,
                                 "model": model,  # Model selected by user in chat UI
+                                "max_tokens": max_tokens,  # Optional: limit response tokens (for benchmarking)
                                 "plan_steps": plan_steps,
                                 "flow": flow,
                                 "tenant_id": tenant_id,

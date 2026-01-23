@@ -213,16 +213,21 @@ def agent_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 
     # Get model from state (selected by user in chat UI)
     selected_model = state.get("model", "gpt-4o-mini")
-    logger.info(f"[AGENT_NODE] Using model: {selected_model}")
+    max_tokens = state.get("max_tokens")  # Optional: limit response tokens (for benchmarking)
+    logger.info(f"[AGENT_NODE] Using model: {selected_model}, max_tokens: {max_tokens}")
 
     # Create LLM with tools (streaming callbacks for frontend only)
-    llm = ChatOpenAI(
-        model=selected_model,
-        api_key=state["api_key"],
-        temperature=0.3,
-        streaming=True,
-        callbacks=callbacks,  # Frontend streaming callbacks only
-    ).bind_tools(TOOLS)
+    llm_kwargs = {
+        "model": selected_model,
+        "api_key": state["api_key"],
+        "temperature": 0.3,
+        "streaming": True,
+        "callbacks": callbacks,  # Frontend streaming callbacks only
+    }
+    if max_tokens is not None:
+        llm_kwargs["max_tokens"] = max_tokens
+
+    llm = ChatOpenAI(**llm_kwargs).bind_tools(TOOLS)
 
     # Build context message
     context_parts = []

@@ -374,6 +374,8 @@ class ChatWorkflow:
                 tenant_id = self.initial_state.get("tenant_id") or user_id
                 # Get model from signal data or fall back to initial_state
                 model = signal_data.get("model") or self.initial_state.get("model")
+                # Get max_tokens from signal data (optional: for benchmarking)
+                max_tokens = signal_data.get("max_tokens")
 
                 state = {
                     "user_id": user_id,
@@ -384,6 +386,7 @@ class ChatWorkflow:
                     "run_id": signal_data.get("run_id"),
                     "parent_message_id": signal_data.get("parent_message_id"),
                     "model": model,  # Model selected by user in chat UI
+                    "max_tokens": max_tokens,  # Optional: limit response tokens (for benchmarking)
                     "tenant_id": tenant_id,
                     "org_slug": self.initial_state.get("org_slug"),
                     "org_roles": self.initial_state.get("org_roles", []),

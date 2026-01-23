@@ -293,6 +293,31 @@ See [docs/security_check.md](./docs/security_check.md) for security audit notes.
 
 ---
 
+## Stress Test Results
+
+Concurrent user load testing with Temporal worker scaling:
+
+| Level | Users | Success | Throughput | Median Latency |
+|-------|-------|---------|------------|----------------|
+| 1 | 10 | 100% | 2.3/s | 3.5s |
+| 2 | 20 | 100% | 6.4/s | 2.5s |
+| 3 | 50 | 100% | 6.5/s | 6.5s |
+| 4 | 100 | 100% | 6.2/s | 13.2s |
+| 5 | 200 | 67.5%* | 3.3/s | 41.2s |
+
+*Level 5 with 2 workers; scale to 4 workers for 200+ users.
+
+**Scaling:** The system scales horizontally by adding Temporal workers. Each worker processes LangGraph workflows independently, and Temporal distributes work automatically.
+
+```bash
+# Scale workers for higher load
+docker-compose up -d --scale worker=4
+```
+
+See [docs/STRESS_TEST.md](./docs/STRESS_TEST.md) for full documentation.
+
+---
+
 ## License
 
 MIT

@@ -54,6 +54,7 @@ class AgentState(TypedDict):
     session_id: int
     api_key: str
     model: str  # Selected model from chat UI (e.g., "gpt-4o", "gpt-4o-mini")
+    max_tokens: Optional[int]  # Optional: limit response tokens (for benchmarking)
 
     # Agent's dynamic task list
     tasks: List[TaskDict]
@@ -198,6 +199,7 @@ def create_initial_state(
     api_key: str,
     run_id: Optional[str] = None,
     model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Create a validated initial state for the workflow.
@@ -209,6 +211,7 @@ def create_initial_state(
         api_key: OpenAI API key
         run_id: Optional run ID for tracking
         model: Optional model name (defaults to "gpt-4o-mini")
+        max_tokens: Optional max tokens for response (for benchmarking)
 
     Returns:
         Initial state dictionary ready for workflow
@@ -236,6 +239,7 @@ def create_initial_state(
         "session_id": validated_input.session_id,
         "api_key": validated_input.api_key,
         "model": selected_model,
+        "max_tokens": max_tokens,
         "tasks": [],
         "rag_context": "",
         "player_data": None,

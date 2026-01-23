@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List
 from collections import deque
 
 import redis.asyncio as redis
-from app.settings import REDIS_URL, REDIS_PASSWORD
+from app.settings import REDIS_URL, REDIS_PASSWORD, REDIS_MAX_CONNECTIONS
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -81,11 +81,12 @@ async def get_redis_client() -> redis.Redis:
             decode_responses=False,  # We'll decode in the caller
             socket_connect_timeout=5,
             socket_timeout=5,
-            max_connections=50,  # Max connections per event loop (scalable via horizontal scaling)
+            max_connections=REDIS_MAX_CONNECTIONS,  # Configurable via REDIS_MAX_CONNECTIONS env var
             retry_on_timeout=True,
             # Health check to detect stale connections
             health_check_interval=30,  # Check connection health every 30 seconds
         )
+        logger.info(f"Redis pool created with max_connections={REDIS_MAX_CONNECTIONS}")
         _pools_by_loop[loop] = pool
         logger.info("Redis connection pool created for loop %s", id(loop))
 

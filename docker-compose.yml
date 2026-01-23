@@ -194,6 +194,9 @@ services:
       - media_data:/app/media
     networks:
       - app-network
+    deploy:
+      mode: replicated
+      replicas: 2
 
   temporal:
     image: temporalio/auto-setup

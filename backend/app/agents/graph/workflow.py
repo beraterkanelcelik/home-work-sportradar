@@ -359,6 +359,7 @@ async def stategraph_workflow_events(
 
                 # Get model from request (selected by user in chat UI)
                 selected_model = request.get("model", "gpt-4o-mini")
+                max_tokens = request.get("max_tokens")  # Optional: limit response tokens (for benchmarking)
 
                 initial_state = {
                     "messages": [HumanMessage(content=request.get("message", ""))],
@@ -366,6 +367,7 @@ async def stategraph_workflow_events(
                     "session_id": request.get("session_id", 0),
                     "api_key": request.get("api_key", ""),
                     "model": selected_model,
+                    "max_tokens": max_tokens,
                     "tasks": [],
                     "rag_context": "",
                     "player_data": None,
