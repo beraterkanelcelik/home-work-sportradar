@@ -188,6 +188,9 @@ services:
   # -------------------------
 
   worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     image: home-work-sportradar-backend
     command: python app/agents/temporal/worker.py
     depends_on:
