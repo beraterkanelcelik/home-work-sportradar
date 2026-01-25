@@ -4,7 +4,7 @@ A production-grade agentic web application for sports player scouting. The agent
 
 ![Demo](./docs/app.gif)
 
-**[Watch Full Demo on YouTube]([https://youtu.be/JvumbHCRn7E])**
+**[Watch Full Demo on YouTube](https://youtu.be/JvumbHCRn7E)**
 
 ---
 
