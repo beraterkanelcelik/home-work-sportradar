@@ -27,6 +27,9 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # Copy application code
 COPY . /app
 
+# 🔒 CRITICAL: Normalize line endings for Windows-created shell scripts
+RUN sed -i 's/\r$//' /app/create_databases.sh
+
 # Make scripts executable
 RUN chmod +x /app/create_databases.sh /app/create_minio_bucket.py
 
@@ -36,5 +39,5 @@ RUN mkdir -p /app/staticfiles
 # Expose port
 EXPOSE 8000
 
-# Default command
+# Default command (docker-compose overrides this)
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
