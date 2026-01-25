@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # -------------------------
   # Infrastructure
@@ -51,14 +49,14 @@ services:
       - app-network
 
   # -------------------------
-  # Backend
+  # Backend (API)
   # -------------------------
 
   backend:
-    image: home-work-sportradar-backend   # ✅ FIX: named image
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: home-work-sportradar-backend
     container_name: django-backend
     command: >
       sh -c "
@@ -98,7 +96,7 @@ services:
       - app-network
 
   # -------------------------
-  # Heavy / async services
+  # Async / Heavy services
   # -------------------------
 
   clickhouse:
@@ -185,7 +183,14 @@ services:
     networks:
       - app-network
 
+  # -------------------------
+  # Temporal worker (FIXED)
+  # -------------------------
+
   worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     image: home-work-sportradar-backend
     command: python app/agents/temporal/worker.py
     depends_on:
@@ -197,9 +202,6 @@ services:
       - media_data:/app/media
     networks:
       - app-network
-    deploy:
-      mode: replicated
-      replicas: 2
 
   temporal:
     image: temporalio/auto-setup
