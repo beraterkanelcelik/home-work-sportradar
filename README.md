@@ -19,7 +19,7 @@ cp .env.example .env
 ### 2. Launch Services
 
 ```bash
-docker-compose up -d
+docker-compose up -d --build
 ```
 
 Wait for all services to be healthy (~60 seconds on first run).
