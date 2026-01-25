@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   # -------------------------
   # Infrastructure
@@ -53,6 +55,7 @@ services:
   # -------------------------
 
   backend:
+    image: home-work-sportradar-backend   # ✅ FIX: named image
     build:
       context: ./backend
       dockerfile: Dockerfile
