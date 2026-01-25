@@ -203,6 +203,7 @@ services:
     networks:
       - app-network
 
+
   temporal:
     image: temporalio/auto-setup
     environment:
