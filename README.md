@@ -2,13 +2,14 @@
 
 A production-grade agentic web application for sports player scouting. The agent accepts natural language goals, generates execution plans, and performs real actions across server and client.
 
-![Demo](./docs/demo.gif)
+![Demo](./docs/app.gif)
 
-**[Watch Full Demo on YouTube](https://youtube.com/your-video-link)**
+**[Watch Full Demo on YouTube]([https://youtu.be/JvumbHCRn7E])**
 
 ---
 
 ## Quick Start
+![Setup](./docs/setup.gif)
 
 ### 1. Environment Setup
 
@@ -52,7 +53,6 @@ You're ready to scout players.
 
 ## What This App Does
 
-![Status Demo](./docs/status.gif)
 
 A scouting agent that demonstrates:
 
